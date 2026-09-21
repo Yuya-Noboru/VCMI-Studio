@@ -1,0 +1,93 @@
+{
+    "name": "Creature",
+    "groups": [
+        {
+            "id": 0,
+            "name": "Moving"
+        },
+        {
+            "id": 1,
+            "name": "Mouse Over"
+        },
+        {
+            "id": 2,
+            "name": "Standing"
+        },
+        {
+            "id": 3,
+            "name": "Getting Hit"
+        },
+        {
+            "id": 4,
+            "name": "Defend"
+        },
+        {
+            "id": 5,
+            "name": "Death"
+        },
+        {
+            "id": 6,
+            "name": "Unused Death"
+        },
+        {
+            "id": 7,
+            "name": "Turn Left"
+        },
+        {
+            "id": 8,
+            "name": "Turn Right"
+        },
+        {
+            "id": 9,
+            "name": "Turn Left (2)"
+        },
+        {
+            "id": 10,
+            "name": "Turn Right (2)"
+        },
+        {
+            "id": 11,
+            "name": "Attack Up"
+        },
+        {
+            "id": 12,
+            "name": "Attack Straight"
+        },
+        {
+            "id": 13,
+            "name": "Attack Down"
+        },
+        {
+            "id": 14,
+            "name": "Shoot Up"
+        },
+        {
+            "id": 15,
+            "name": "Shoot Straight"
+        },
+        {
+            "id": 16,
+            "name": "Shoot Down"
+        },
+        {
+            "id": 17,
+            "name": "2-Hex/Spell Attack Up"
+        },
+        {
+            "id": 18,
+            "name": "2-Hex/Spell Attack Straight"
+        },
+        {
+            "id": 19,
+            "name": "2-Hex/Spell Attack Down"
+        },
+        {
+            "id": 20,
+            "name": "Start Moving"
+        },
+        {
+            "id": 21,
+            "name": "Stop Moving"
+        }
+    ]
+}

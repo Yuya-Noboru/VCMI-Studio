@@ -1,0 +1,328 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VCMI_Master_Bonus_System_Library",
+  "description": "Absolute reference library for VCMI bonus generation. Contains all documented formats, enumerators, limiters, propagators, updaters, and bonus types.",
+  
+  "Base_Format": {
+    "description": "Standard structure of a 'bonus' object in VCMI. Only the 'type' field is strictly mandatory, the rest depends on the context.",
+    "BonusObject": {
+      "type": "string (e.g., 'PRIMARY_SKILL')",
+      "subtype": "string (e.g., 'primarySkill.attack', 'spellSchool.air', 'creature.angel')",
+      "val": "integer (Mathematical value of the effect, e.g., 3, -1, 50)",
+      "valueType": "string (Value from Enums.ValueTypes)",
+      "addInfo": "any (Additional information specific to the bonus. Integer, boolean, array or string)",
+      "duration": "string | array (Value from Enums.DurationTypes)",
+      "turns": "integer (Duration in turns or days, if applicable)",
+      "limiters": "array (List of limiters and/or Limiter objects. See Limiters section)",
+      "propagator": "string | array (Value from Enums.PropagatorTypes, propagates the bonus 'upwards')",
+      "updater": "string | object | array (Mathematical scaling function. See Updaters section)",
+      "propagationUpdater": "string | object (Updater triggered only during propagation)",
+      "description": "string (Human-readable text in the game, limited to creature abilities)",
+      "icon": "string (Path to the icon, e.g., 'myMod/icon.png')",
+      "hidden": "boolean (Hide the bonus in the interface)",
+      "stacking": "string (Identical character string shared between entities to prevent bonus accumulation)"
+    }
+  },
+
+  "Enums": {
+    "DurationTypes": [
+      "PERMANENT", "ONE_BATTLE", "ONE_DAY", "ONE_WEEK", "N_TURNS", "N_DAYS", 
+      "UNTIL_BEING_ATTACKED", "UNTIL_ATTACK", "STACK_GETS_TURN", "COMMANDER_KILLED", "UNTIL_OWN_ATTACK"
+    ],
+    "PropagatorTypes": [
+      "ARMY", "HERO", "TOWN", "TOWN_AND_VISITOR", "BATTLE_WIDE", "PLAYER", "TEAM", "GLOBAL_EFFECT"
+    ],
+    "ValueTypes": [
+      "ADDITIVE_VALUE", "BASE_NUMBER", "PERCENT_TO_ALL", "PERCENT_TO_BASE", 
+      "PERCENT_TO_SOURCE", "PERCENT_TO_TARGET_TYPE", "INDEPENDENT_MAX", "INDEPENDENT_MIN"
+    ],
+    "RangeTypes": [
+      "NO_LIMIT", "ONLY_DISTANCE_FIGHT", "ONLY_MELEE_FIGHT"
+    ],
+    "SourceTypes": [
+      "ARTIFACT", "ARTIFACT_INSTANCE", "OBJECT", "CREATURE_ABILITY", "TERRAIN_NATIVE", 
+      "TERRAIN_OVERLAY", "SPELL_EFFECT", "TOWN_STRUCTURE", "HERO_BASE_SKILL", "SECONDARY_SKILL", 
+      "HERO_SPECIAL", "ARMY", "CAMPAIGN_BONUS", "SPECIAL_WEEK", "STACK_EXPERIENCE", "COMMANDER", "GLOBAL", "OTHER"
+    ]
+  },
+
+  "Limiters": {
+    "description": "Limiters act as 'if' conditions for applying a bonus.",
+    "AggregateLimiters": {
+      "allOf": "All conditions must be true (Default behavior if omitted)",
+      "anyOf": "At least one condition must be true",
+      "noneOf": "None of the conditions must be true"
+    },
+    "PredefinedLimiters": [
+      "SHOOTER_ONLY", "DRAGON_NATURE", "IS_UNDEAD", "CREATURE_NATIVE_TERRAIN", 
+      "CREATURES_ONLY", "UNIT_DEFENDING", "OPPOSITE_SIDE"
+    ],
+    "CustomizableLimiters": {
+      "HAS_ANOTHER_BONUS_LIMITER": {
+        "parameters": {
+          "bonusType": "string", "bonusSubtype": "string", "bonusSourceType": "string", 
+          "bonusSourceID": "string", "bonusMinValue": "integer", "bonusMaxValue": "integer"
+        }
+      },
+      "CREATURE_TYPE_LIMITER": {
+        "parameters": { "creature": "string (Creature ID)", "includeUpgrades": "boolean" }
+      },
+      "CREATURE_ALIGNMENT_LIMITER": {
+        "parameters": { "alignment": "enum ('good', 'evil', 'neutral')" }
+      },
+      "CREATURE_LEVEL_LIMITER": {
+        "parameters": { "minLevel": "integer [0..7]", "maxLevel": "integer [0..7]" }
+      },
+      "FACTION_LIMITER": {
+        "aliases": ["CREATURE_FACTION_LIMITER"],
+        "parameters": { "faction": "string (Faction ID)" }
+      },
+      "TERRAIN_LIMITER": {
+        "aliases": ["CREATURE_TERRAIN_LIMITER"],
+        "parameters": { "terrain": "string (Terrain ID)" }
+      },
+      "HAS_CHARGES_LIMITER": {
+        "parameters": { "cost": "integer" }
+      },
+      "UNIT_ADJACENT": {
+        "parameters": { "creature": "string (Creature ID)" }
+      },
+      "UNIT_ON_HEXES": {
+        "parameters": { "hexes": "array of integers (e.g., [25, 50, 75])" }
+      }
+    }
+  },
+
+  "Updaters": {
+    "description": "Dynamic mathematical formulas to scale the bonus value (val).",
+    "GROWS_WITH_LEVEL": {
+      "formula": "ceil(valPer20 * floor(heroLevel / stepSize) / 20)",
+      "parameters": { "valPer20": "integer", "stepSize": "integer" }
+    },
+    "TIMES_HERO_LEVEL": {
+      "formula": "val * heroLevel / stepSize",
+      "parameters": { "stepSize": "integer (optional, default 1)" }
+    },
+    "TIMES_STACK_LEVEL": {
+      "formula": "val * stackLevel (0 for War Machines, 1 to 7 for units)"
+    },
+    "DIVIDE_STACK_LEVEL": {
+      "formula": "val / stackLevel"
+    },
+    "TIMES_HERO_LEVEL_DIVIDE_STACK_LEVEL": {
+      "formula": "(val * heroLevel) / stackLevel"
+    },
+    "TIMES_STACK_SIZE": {
+      "formula": "val * floor(stackSize / stepSize)",
+      "parameters": { "minimum": "integer", "maximum": "integer", "stepSize": "integer", "filteredFaction": "string", "filteredLevel": "integer [0..7]" }
+    },
+    "TIMES_ARMY_SIZE": {
+      "parameters": { "filteredCreature": "string", "minimum": "integer", "maximum": "integer", "stepSize": "integer" }
+    },
+    "BONUS_OWNER_UPDATER": {
+      "description": "Required in conjunction with the BATTLE_WIDE propagator and the OPPOSITE_SIDE limiter to affect only the enemy side in combat."
+    }
+  },
+
+  "BonusTypes_Dictionary": {
+    "description": "The dictionary of all recognized bonus types, with the behavior of their parameters.",
+    
+    "General": {
+      "NONE": { "description": "No effect" },
+      "MORALE": { "val": "integer [-9..9] (Morale change)" },
+      "LUCK": { "val": "integer [-9..9] (Luck change)" },
+      "MAGIC_SCHOOL_SKILL": { "subtype": "string (School, e.g., spellSchool.air)", "val": "integer [0..3] (Mastery level: 0=None, 1=Basic, 2=Advanced, 3=Expert)" },
+      "ON_COMBAT_EVENT": { "subtype": "string (e.g., combatEventBeforeAttack, combatEventDefend)", "addInfo": "object (Structure defining targetEnemy, action, spell/bonus)" }
+    },
+    
+    "Player_Global": {
+      "RESOURCES_CONSTANT_BOOST": { "subtype": "string (Resource ID)", "val": "integer (Quantity per day)" },
+      "RESOURCES_TOWN_MULTIPLYING_BOOST": { "subtype": "string (Resource ID)", "val": "integer (Base per day * number of towns)" }
+    },
+    
+    "Hero_Exploration": {
+      "MOVEMENT": { "subtype": "enum ('heroMovementLand', 'heroMovementSea')", "val": "integer (Points. 100 = 1 tile)" },
+      "WATER_WALKING": { "val": "integer [0..100] (Penalty percentage)" },
+      "FLYING_MOVEMENT": { "val": "integer [0..100] (Penalty percentage)" },
+      "NO_TERRAIN_PENALTY": { "subtype": "string (Terrain ID, e.g., 'sand')" },
+      "TERRAIN_NATIVE": { "description": "The army ignores all terrain penalties." },
+      "SIGHT_RADIUS": { "val": "integer (Vision radius in tiles)" },
+      "DARKNESS": { "val": "integer (Radius in tiles of generated fog)", "addInfo": "integer (Activation period, e.g., 7, optional)" },
+      "FULL_MAP_SCOUTING": { "addInfo": "integer (Activation period, optional)" },
+      "FULL_MAP_DARKNESS": { "addInfo": "integer (Activation period, optional)" },
+      "ROUGH_TERRAIN_DISCOUNT": { "val": "integer (Penalty reduction in points. Pathfinding)" }
+    },
+
+    "Hero_Stats_And_Magic": {
+      "PRIMARY_SKILL": { "subtype": "enum ('primarySkill.attack', 'primarySkill.defense', 'primarySkill.spellpower', 'primarySkill.knowledge')", "val": "integer", "addInfo": "integer [1..2] (1=melee only, 2=ranged only)" },
+      "MANA_REGENERATION": { "val": "integer (Mana points restored)" },
+      "MANA_PERCENTAGE_REGENERATION": { "val": "integer [0..100] (Percentage of max pool)" },
+      "MANA_PER_KNOWLEDGE_PERCENTAGE": { "val": "integer [0..100] (Percentage of points per Knowledge)" },
+      "COMBAT_MANA_BONUS": { "val": "integer (Temporary combat bonus mana)" },
+      "MAX_LEARNABLE_SPELL_LEVEL": { "val": "integer [1..5] (Max level, Wisdom)" },
+      "LEARN_BATTLE_SPELL_CHANCE": { "val": "integer [0..100] (Percentage chance to learn)" },
+      "LEARN_BATTLE_SPELL_LEVEL_LIMIT": { "val": "integer [1..5] (Max learnable enemy spell level)" },
+      "LEARN_MEETING_SPELL_LIMIT": { "val": "integer [1..5] (Max level, Scholar)" }
+    },
+
+    "Hero_Army_Combat": {
+      "NONEVIL_ALIGNMENT_MIX": { "description": "Avoids morale penalty when mixing Good and Neutral" },
+      "SURRENDER_DISCOUNT": { "val": "integer [0..100] (Cost reduction percentage)" },
+      "HERO_EXPERIENCE_GAIN_PERCENT": { "val": "integer (XP bonus percentage)" },
+      "STACK_EXPERIENCE_GAIN_PERCENT": { "val": "integer (Stack XP bonus percentage)" },
+      "WANDERING_CREATURES_JOIN_BONUS": { "val": "integer (Diplomacy modifier)" },
+      "BEFORE_BATTLE_REPOSITION": { "val": "integer (Placement distance, Tactics)" },
+      "BEFORE_BATTLE_REPOSITION_BLOCK": { "val": "integer (Canceled distance, Tactics)" },
+      "HERO_GRANTS_ATTACKS": { "subtype": "string (Creature ID)", "val": "integer (Number of extra attacks)" },
+      "BONUS_DAMAGE_CHANCE": { "subtype": "string (Creature ID)", "val": "integer [0..100] (Percentage chance)" },
+      "BONUS_DAMAGE_PERCENTAGE": { "subtype": "string (Creature ID)", "val": "integer (Damage boost percentage)" }
+    },
+
+    "Necromancy_Specialties": {
+      "IMPROVED_NECROMANCY": { "subtype": "string (Creature ID)", "val": "integer (Necromancy power)", "addInfo": "integer (Required level)" },
+      "UNDEAD_RAISE_PERCENTAGE": { "val": "integer (Percentage of raised army)" },
+      "SKELETON_TRANSFORMER_TARGET": { "subtype": "string (Creature ID)" }
+    },
+
+    "Hero_Specialties": {
+      "SPECIAL_SPELL_LEV": { "subtype": "string (Spell ID)", "val": "integer (Percentage boost / level)" },
+      "SPELL_DAMAGE": { "subtype": "string (Magic School)", "val": "integer (Percentage boost)" },
+      "SPECIFIC_SPELL_DAMAGE": { "subtype": "string (Spell ID)", "val": "integer (Percentage boost)" },
+      "SPECIAL_PECULIAR_ENCHANT": { "subtype": "string (Spell ID)", "addInfo": "integer [0..1] (1 for Slayer, 0 otherwise)" },
+      "SPECIAL_ADD_VALUE_ENCHANT": { "subtype": "string (Spell ID)", "addInfo": "integer (Raw addition to the target spell's 'val' variable)" },
+      "SPECIAL_FIXED_VALUE_ENCHANT": { "subtype": "string (Spell ID)", "addInfo": "integer (Sets the target spell's 'val' variable to this value)" },
+      "SPECIAL_UPGRADE": { "subtype": "string (Creature ID)", "addInfo": "string (Creature ID)" }
+    },
+
+    "Artifacts_And_Map": {
+      "SPELL_DURATION": { "subtype": "string (Spell ID, optional)", "val": "integer (Bonus turns)" },
+      "SPELL": { "subtype": "string (Spell ID)", "val": "integer [0..3] (Mastery level 0-3)" },
+      "SPELLS_OF_LEVEL": { "subtype": "enum ('spellLevel1', 'spellLevel2', 'spellLevel3', 'spellLevel4', 'spellLevel5')" },
+      "SPELLS_OF_SCHOOL": { "subtype": "string (Magic School)" },
+      "GENERATE_RESOURCE": { "subtype": "string (Resource ID)", "val": "integer (Daily income)" },
+      "CREATURE_GROWTH": { "subtype": "enum ('creatureLevel1', 'creatureLevel2', 'creatureLevel3', 'creatureLevel4', 'creatureLevel5', 'creatureLevel6', 'creatureLevel7')", "val": "integer (Weekly growth)" },
+      "CREATURE_GROWTH_PERCENT": { "val": "integer (Percentage boost)" },
+      "BATTLE_NO_FLEEING": { "description": "Shackles of War" },
+      "NEGATE_ALL_NATURAL_IMMUNITIES": { "subtype": "enum ('immunityBattleWide', 'immunityEnemyHero')" },
+      "OPENING_BATTLE_SPELL": { "subtype": "string (Spell ID)", "val": "integer (Duration in rounds)", "addInfo": "integer [1..3] (Mastery, 1 or 3)" },
+      "FREE_SHIP_BOARDING": { "description": "Removes movement loss upon boarding" },
+      "WHIRLPOOL_PROTECTION": { "description": "Protection against whirlpools" },
+      "FORCE_NEUTRAL_ENCOUNTER_STACK_COUNT": { "val": "integer (Number of stacks)", "addInfo": "array (Weights [W1..W7])" }
+    },
+
+    "Creature_Stats": {
+      "STACK_HEALTH": { "val": "integer (Bonus max HP)" },
+      "STACKS_SPEED": { "val": "integer (Bonus speed)" },
+      "CREATURE_DAMAGE": { "subtype": "enum ('creatureDamageMin', 'creatureDamageMax', 'creatureDamageBoth')", "val": "integer" },
+      "SHOTS": { "val": "integer (Bonus ammo)" }
+    },
+
+    "Creature_Natures": {
+      "LIVING": { "description": "Considered alive. Subject to morale/drain" },
+      "NON_LIVING": { "description": "Immune to morale and certain spells" },
+      "MECHANICAL": { "description": "Can be repaired by engineers (HotA)" },
+      "GARGOYLE": { "description": "Specific immunity" },
+      "UNDEAD": { "description": "Immune to positive morale, lowers morale of living allies" },
+      "SIEGE_WEAPON": { "description": "Immobile, cannot be resurrected" }
+    },
+
+    "Creature_Static_Abilities": {
+      "DRAGON_NATURE": { "description": "Dragon nature, used as Limiter" },
+      "KING": { "val": "integer [1..3] (Slayer mastery required to affect it)" },
+      "NO_LUCK": { "description": "Affected units cannot receive luck (good or bad)" },
+      "NO_MORALE": { "description": "Affected units cannot receive morale (good or bad)" },
+      "CPU_CONTROLLED": { "description": "The player cannot control this unit by default" }
+    },
+
+    "Creature_Combat_Abilities": {
+      "FLYING": { "subtype": "enum ('movementFlying', 'movementTeleporting')" },
+      "SHOOTER": { "description": "The unit has a ranged attack" },
+      "CHARGE_IMMUNITY": { "description": "Immune to the JOUSTING skill" },
+      "ADDITIONAL_ATTACK": { "val": "integer (Bonus attacks)" },
+      "UNLIMITED_RETALIATIONS": { "description": "Always retaliates" },
+      "ADDITIONAL_RETALIATION": { "val": "integer (Bonus retaliations)" },
+      "JOUSTING": { "val": "integer (Percentage boost per tile)" },
+      "VULNERABLE_FROM_BACK": { "val": "integer (Percentage penalty when attacked from behind)" },
+      "HATE": { "subtype": "string (Creature ID)", "val": "integer (Percentage damage bonus)" },
+      "HATES_TRAIT": { "subtype": "string (Hated bonus ID, e.g., 'UNDEAD')", "val": "integer (Percentage damage bonus)" },
+      "SPELL_LIKE_ATTACK": { "subtype": "string (Spell ID)", "val": "integer [0..3] (Spell mastery level)" },
+      "ATTACKS_ALL_ADJACENT": { "description": "Attacks all adjacent units (Hydra)" },
+      "MULTIHEX_UNIT_ATTACK": { "addInfo": "array of strings (Attack tiles, e.g., ['FF', 'L', 'R'])" },
+      "MULTIHEX_ENEMY_ATTACK": { "addInfo": "array of strings (Attack tiles on enemies only, e.g., ['FF', 'L', 'R'])" },
+      "MULTIHEX_ANIMATION": { "addInfo": "array of strings (Alternative attack animation tiles)" },
+      "RETURN_AFTER_STRIKE": { "description": "Returns to its place (Harpies)" },
+      "ENEMY_DEFENCE_REDUCTION": { "val": "integer [0..100] (Percentage ignored, Behemoth)" },
+      "GENERAL_DAMAGE_REDUCTION": { "subtype": "enum ('damageTypeMelee', 'damageTypeRanged', 'damageTypeAll')", "val": "integer [0..100] (Reduction percentage)" },
+      "DAMAGE_RECEIVED_CAP": { "val": "integer [0..100] (Percentage of max HP in limited received damage)" },
+      "PERCENTAGE_DAMAGE_BOOST": { "subtype": "enum ('damageTypeMelee', 'damageTypeRanged')", "val": "integer (Damage increase percentage)" },
+      "GENERAL_ATTACK_REDUCTION": { "val": "integer [0..100] (Damage dealt reduction percentage)" },
+      "DEFENSIVE_STANCE": { "val": "integer (Additional defense bonus when defending)" },
+      "NO_DISTANCE_PENALTY": { "description": "No distance penalty" },
+      "NO_MELEE_PENALTY": { "description": "Shooter deals full damage in melee" },
+      "NO_WALL_PENALTY": { "description": "Deals full damage when shooting over walls" },
+      "FREE_SHOOTING": { "description": "Can shoot even if blocked by an enemy in melee" },
+      "BLOCKS_RETALIATION": { "description": "Never receives a retaliation upon attacking" },
+      "SOUL_STEAL": { "subtype": "enum ('soulStealPermanent', 'soulStealBattle')", "val": "integer (Gains per enemy killed)" },
+      "TRANSMUTATION": { "subtype": "enum ('transmutationPerHealth', 'transmutationPerUnit')", "val": "integer [0..100] (Chance)", "addInfo": "string (Creature ID)" },
+      "TRANSMUTATION_IMMUNITY": { "description": "Immune to TRANSMUTATION" },
+      "SUMMON_GUARDIANS": { "subtype": "string (Creature ID)", "val": "integer [0..100] (Quantity % of the stack)" },
+      "RANGED_RETALIATION": { "description": "Retaliates against ranged attacks" },
+      "BLOCKS_RANGED_RETALIATION": { "description": "Blocks ranged retaliation" },
+      "FIRST_STRIKE": { "subtype": "enum ('damageTypeMelee', 'damageTypeRanged', 'damageTypeAll')" },
+      "SHOOTS_ALL_ADJACENT": { "description": "Attacks all hexes around the targeted hex when shooting" },
+      "DESTRUCTION": { "subtype": "enum ('destructionKillPercentage', 'destructionKillAmount')", "val": "integer [0..100] (Trigger chance %)", "addInfo": "integer (Quantity)" },
+      "LIMITED_SHOOTING_RANGE": { "val": "integer (Max range in hexes)", "addInfo": "integer (Range where penalty applies, optional)" },
+      "FEROCITY": { "val": "integer (Additional attacks if killed)", "addInfo": "integer (Creatures to kill, optional)" },
+      "ENEMY_ATTACK_REDUCTION": { "val": "integer [0..100] (Ignore percentage of attacked unit's attack)" },
+      "REVENGE": { "description": "Deals more damage based on the health percentage lost by the stack" }
+    },
+
+    "Creature_Special_Abilities": {
+      "CATAPULT": { "subtype": "string (Spell describing the siege attack parameters)" },
+      "CATAPULT_EXTRA_SHOTS": { "subtype": "string (Affected spell)", "val": "integer [0..3] (Mastery level)" },
+      "MANUAL_CONTROL": { "subtype": "string (Creature ID)", "val": "integer [0..100] (Control chance percentage)" },
+      "CHANGES_SPELL_COST_FOR_ALLY": { "val": "integer (Mana point reduction)" },
+      "CHANGES_SPELL_COST_FOR_ENEMY": { "val": "integer (Mana point increase)" },
+      "SPELL_RESISTANCE_AURA": { "val": "integer [0..100] (Additional magic resistance bonus percentage)" },
+      "HP_REGENERATION": { "val": "integer (Health points regenerated per turn)" },
+      "MANA_DRAIN": { "val": "integer (Mana points stolen per turn from enemy hero)" },
+      "MANA_CHANNELING": { "val": "integer [0..100] (Percentage of mana points spent by enemy restored)" },
+      "LIFE_DRAIN": { "val": "integer (Percentage of damage converted to health/resurrection)" },
+      "DOUBLE_DAMAGE_CHANCE": { "val": "integer [0..100] (Double damage chance percentage)" },
+      "FEARFUL": { "val": "integer [0..100] (Chance for the unit to freeze in fear)" },
+      "HEALER": { "subtype": "string (Spell ID)" },
+      "FIRE_SHIELD": { "val": "integer [0..100] (Percentage of damage returned in melee)" },
+      "MAGIC_MIRROR": { "val": "integer [0..100] (Chance to reflect the spell percentage)" },
+      "DEATH_STARE": { "subtype": "enum ('deathStareGorgon', 'deathStareCommander')", "val": "integer (Chance or fixed amount)", "addInfo": "string (Spell ID, optional)" },
+      "SPECIAL_CRYSTAL_GENERATION": { "description": "Generates 3 crystals per week if controlled by the player" },
+      "NO_SPELLCAST_BY_DEFAULT": { "description": "Does not cast spells as default attack" }
+    },
+
+    "Creature_Spellcasting_Abilities": {
+      "SPELLCASTER": { "subtype": "string (Spell ID)", "val": "integer [0..3] (Mastery level)", "addInfo": "integer (Chance weight, optional)" },
+      "ENCHANTER": { "subtype": "string (Spell ID)", "val": "integer [0..3] (Mastery level)", "addInfo": "integer (Cooldown in turns)" },
+      "RANDOM_SPELLCASTER": { "val": "integer [0..3] (Mastery level)" },
+      "ADJACENT_SPELLCASTER": { "subtype": "string (Spell ID)", "val": "integer [0..3] (Mastery level)" },
+      "CASTS": { "val": "integer (Number of casts available per combat)" },
+      "SPELL_AFTER_ATTACK": { "subtype": "string (Spell ID)", "val": "integer [0..100] (Chance %)", "addInfo": "array ([Mastery, Attack type, Layer])" },
+      "SPELL_BEFORE_ATTACK": { "subtype": "string (Spell ID)", "val": "integer [0..100] (Chance %)", "addInfo": "array ([Mastery, Attack type, Layer])" },
+      "SPECIFIC_SPELL_POWER": { "subtype": "string (Spell ID)", "val": "integer (Spell power)" },
+      "SPECIFIC_SPELL_RANGE": { "subtype": "string (Spell ID)", "val": "integer (Range limit)" },
+      "CREATURE_SPELL_POWER": { "val": "integer (Spell power * 100)" },
+      "CREATURE_ENCHANT_POWER": { "val": "integer (Total duration of cast spells, in turns)" },
+      "REBIRTH": { "subtype": "enum ('rebirthRegular', 'rebirthSpecial')", "val": "integer [0..100] (Percentage of total stack HP restored)" },
+      "ENCHANTED": { "subtype": "string (Spell ID)", "val": "integer (Mastery level, >3 for mass effect)" }
+    },
+
+    "Creature_Spell_Immunities": {
+      "LEVEL_SPELL_IMMUNITY": { "val": "integer [1..5] (Max level of blocked spell)", "addInfo": "integer (1 for absolute immunity)" },
+      "MAGIC_RESISTANCE": { "val": "integer [0..100] (Chance to resist percentage)" },
+      "SPELL_DAMAGE_REDUCTION": { "subtype": "string (Magic school ID)", "val": "integer [0..100] (Damage reduction percentage)" },
+      "MORE_DAMAGE_FROM_SPELL": { "subtype": "string (Spell ID)", "val": "integer (Damage increase percentage)" },
+      "MIND_IMMUNITY": { "description": "Immune to all mind spells" },
+      "SPELL_IMMUNITY": { "subtype": "string (Spell ID)", "description": "Totally immune to the specified spell" },
+      "SPELL_SCHOOL_IMMUNITY": { "subtype": "string (Magic school ID)", "description": "Totally immune to this magic school" },
+      "RECEPTIVE": { "description": "Accepts all friendly spells, even in case of normal immunity" }
+    }
+  }
+}

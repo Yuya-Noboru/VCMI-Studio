@@ -1,0 +1,25 @@
+{
+    "name": "Hero Combat",
+    "groups": [
+        {
+            "id": 0,
+            "name": "Standing"
+        },
+        {
+            "id": 1,
+            "name": "Shuffle"
+        },
+        {
+            "id": 2,
+            "name": "Failure"
+        },
+        {
+            "id": 3,
+            "name": "Victory"
+        },
+        {
+            "id": 4,
+            "name": "Cast Spell"
+        }
+    ]
+}

@@ -1,0 +1,45 @@
+{
+    "name": "Hero AdvMap",
+    "groups": [
+        {
+            "id": 0,
+            "name": "Looking Up"
+        },
+        {
+            "id": 1,
+            "name": "Looking Up Right"
+        },
+        {
+            "id": 2,
+            "name": "Looking Right"
+        },
+        {
+            "id": 3,
+            "name": "Looking Down-Right"
+        },
+        {
+            "id": 4,
+            "name": "Looking Down"
+        },
+        {
+            "id": 5,
+            "name": "Move Up"
+        },
+        {
+            "id": 6,
+            "name": "Move Up-Right"
+        },
+        {
+            "id": 7,
+            "name": "Move Right"
+        },
+        {
+            "id": 8,
+            "name": "Move Down-Right"
+        },
+        {
+            "id": 9,
+            "name": "Move Down"
+        }
+    ]
+}

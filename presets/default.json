@@ -1,0 +1,9 @@
+{
+    "name": "Basic (Mono-Group)",
+    "groups": [
+        {
+            "id": 0,
+            "name": "group"
+        }
+    ]
+}
