@@ -25,6 +25,17 @@ class TownscreenTab:
         self.current_filepath = None
         self.current_filename = None
         
+        # Sorting State
+        self.sort_state = "manual" # "manual", "asc", "desc"
+        self.manual_order_snapshot = []
+        
+        # Drag and Drop State variables
+        self._drag_start_y = 0
+        self._drag_active = False
+        self._drag_items = []
+        self._pending_selection = None
+        self._last_clicked_item = None
+        
         # Zoom & Panning State
         self.zoom_level = 1.0
         
@@ -66,6 +77,12 @@ class TownscreenTab:
         ttk.Button(btn_frame, text="Export", command=self.export_assets).pack(side="left", fill="x", expand=True, padx=2)
         ttk.Button(btn_frame, text="Clear Assets", command=self.clear_assets).pack(side="left", fill="x", expand=True, padx=2)
         
+        sort_frame = ttk.Frame(left_panel)
+        sort_frame.pack(fill="x", padx=5, pady=(0, 2))
+        ttk.Label(sort_frame, text="Sort Name:").pack(side="left")
+        self.btn_sort = ttk.Button(sort_frame, text="Manual", command=self.cycle_sort)
+        self.btn_sort.pack(side="right", fill="x", expand=True, padx=(5, 0))
+        
         self.tree = ttk.Treeview(left_panel, columns=("del", "name"), show="headings", selectmode="extended")
         self.tree.heading("del", text="✖")
         self.tree.column("del", width=35, stretch=False, anchor="center")
@@ -77,11 +94,13 @@ class TownscreenTab:
         scroll_y.pack(side="right", fill="y")
         self.tree.configure(yscrollcommand=scroll_y.set)
         
+        # Treeview Bindings (Including Custom Drag & Drop)
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
-        self.tree.bind("<ButtonRelease-1>", self.on_tree_click)
+        self.tree.bind("<ButtonPress-1>", self.on_tree_press)
+        self.tree.bind("<B1-Motion>", self.on_tree_motion)
+        self.tree.bind("<ButtonRelease-1>", self.on_tree_release)
         self.tree.bind("<Delete>", self.on_delete_key)
         self.tree.bind("<BackSpace>", self.on_delete_key)
-        self.tree.bind("<Control-Shift-Button-1>", self.on_ctrl_shift_click)
         
         h_frame = ttk.Frame(left_panel)
         h_frame.pack(fill="x", padx=5, pady=(0, 5))
@@ -246,6 +265,59 @@ class TownscreenTab:
         return self.app.notebook.index(self.app.notebook.select()) == 2
 
     # -------------------------------------------------------------------------
+    # SORTING LOGIC
+    # -------------------------------------------------------------------------
+    def cycle_sort(self):
+        children = self.tree.get_children()
+        if not children: return
+        
+        if self.sort_state == "manual":
+            self.sort_state = "asc"
+            self.btn_sort.config(text="A-Z")
+            # Snapshot of current manual order before breaking it
+            self.manual_order_snapshot = [self.tree.item(i, "values")[1] for i in children]
+            self.apply_sort(reverse=False)
+            
+        elif self.sort_state == "asc":
+            self.sort_state = "desc"
+            self.btn_sort.config(text="Z-A")
+            self.apply_sort(reverse=True)
+            
+        elif self.sort_state == "desc":
+            self.sort_state = "manual"
+            self.btn_sort.config(text="Manual")
+            self.restore_manual_order()
+            
+        self.sync_data_with_tree()
+        self.save_state()
+
+    def apply_sort(self, reverse=False):
+        # Trie l'arbre en se basant sur le nom du fichier (values[1]) de manière insensible à la casse
+        items = [(self.tree.item(k, "values")[1].lower(), k) for k in self.tree.get_children()]
+        items.sort(reverse=reverse)
+        for index, (val, k) in enumerate(items):
+            self.tree.move(k, '', index)
+
+    def restore_manual_order(self):
+        if not hasattr(self, 'manual_order_snapshot'): return
+        
+        # Mappe les noms de fichiers aux IDs des items du Treeview
+        fname_to_item = {self.tree.item(item, "values")[1]: item for item in self.tree.get_children()}
+        idx = 0
+        
+        # Replace d'abord les éléments connus de l'historique
+        for fname in self.manual_order_snapshot:
+            if fname in fname_to_item:
+                self.tree.move(fname_to_item[fname], '', idx)
+                idx += 1
+                del fname_to_item[fname]
+                
+        # Puis ajoute à la fin les éléments potentiellement importés pendant que le tri était actif
+        for fname, item in fname_to_item.items():
+            self.tree.move(item, '', idx)
+            idx += 1
+
+    # -------------------------------------------------------------------------
     # ZOOM & PANNING LOGIC
     # -------------------------------------------------------------------------
     def global_zoom_in(self, event):
@@ -265,6 +337,13 @@ class TownscreenTab:
         if not self.current_filepath: return
         self.zoom_level = max(0.25, self.zoom_level - 0.25)
         self.refresh_preview()
+
+    def reset_view(self):
+        """Resets zoom to 100% and centers the canvas."""
+        self.zoom_level = 1.0
+        if self.current_filepath:
+            self.refresh_preview()
+        self.center_view()
 
     def on_mousewheel(self, event):
         if not self.current_filepath: return
@@ -305,13 +384,6 @@ class TownscreenTab:
         
         self.canvas.xview_moveto(x_frac)
         self.canvas.yview_moveto(y_frac)
-
-    def reset_view(self):
-        """Resets zoom to 100% and centers the canvas."""
-        self.zoom_level = 1.0
-        if self.current_filepath:
-            self.refresh_preview()
-        self.center_view()
 
     def get_image_coords(self, event_x, event_y):
         """Maps absolute canvas click coordinates to the original 1:1 image pixels."""
@@ -355,11 +427,16 @@ class TownscreenTab:
             self.history = self.history[:self.history_index+1]
             
         state = []
-        for fname, data in self.imported_images.items():
-            new_data = data.copy()
-            if new_data.get("custom_mask") is not None:
-                new_data["custom_mask"] = new_data["custom_mask"].copy()
-            state.append((fname, new_data))
+        # Parcourt le Treeview pour conserver l'ordre exact lors de la sauvegarde !
+        for item in self.tree.get_children():
+            values = self.tree.item(item, "values")
+            if values and len(values) > 1:
+                fname = values[1]
+                if fname in self.imported_images:
+                    new_data = self.imported_images[fname].copy()
+                    if new_data.get("custom_mask") is not None:
+                        new_data["custom_mask"] = new_data["custom_mask"].copy()
+                    state.append((fname, new_data))
             
         self.history.append(state)
         self.history_index += 1
@@ -379,6 +456,10 @@ class TownscreenTab:
             self.restore_state(self.history[self.history_index])
 
     def restore_state(self, state):
+        # Rétablit également le tri sur Manual puisqu'on restaure un ordre précis
+        self.sort_state = "manual"
+        self.btn_sort.config(text="Manual")
+        
         self.imported_images.clear()
         self.tree.delete(*self.tree.get_children())
         
@@ -422,25 +503,6 @@ class TownscreenTab:
         self.ignore_offset_trace = False
         
         self.draw_placeholder()
-
-    def on_ctrl_shift_click(self, event):
-        item = self.tree.identify_row(event.y)
-        if item:
-            focus_item = self.tree.focus()
-            if focus_item:
-                items = self.tree.get_children("")
-                try:
-                    idx1 = items.index(focus_item)
-                    idx2 = items.index(item)
-                    start = min(idx1, idx2)
-                    end = max(idx1, idx2)
-                    to_select = items[start:end+1]
-                    self.tree.selection_add(to_select)
-                except ValueError:
-                    self.tree.selection_add(item)
-            else:
-                self.tree.selection_add(item)
-        return "break"
 
     def draw_placeholder(self):
         self.canvas.delete("all")
@@ -620,8 +682,167 @@ class TownscreenTab:
             self.canvas.create_oval(cx - scaled_r, cy - scaled_r, cx + scaled_r, cy + scaled_r, fill=tk_color, outline="", tags="temp_draw")
 
     # -------------------------------------------------------------------------
-    # TREEVIEW EVENTS & ASSET MANAGEMENT
+    # TREEVIEW EVENTS, DRAG & DROP AND ASSET MANAGEMENT
     # -------------------------------------------------------------------------
+    def sync_data_with_tree(self):
+        """Synchronizes the 'imported_images' dictionary order with the visual Treeview order."""
+        new_dict = {}
+        for item in self.tree.get_children():
+            values = self.tree.item(item, "values")
+            if values and len(values) > 1:
+                fname = values[1]
+                if fname in self.imported_images:
+                    new_dict[fname] = self.imported_images[fname]
+        self.imported_images = new_dict
+
+    def on_tree_press(self, event):
+        """Prepares elements for a potential Drag & Drop while correctly intercepting Shift and Ctrl modifiers."""
+        item = self.tree.identify_row(event.y)
+        if not item:
+            self._drag_items = []
+            return
+            
+        region = self.tree.identify_region(event.x, event.y)
+        if region == "cell":
+            column = self.tree.identify_column(event.x)
+            if column == "#1":
+                self._drag_items = []
+                return # Let the click go through natively for deletion
+
+        self._last_clicked_item = item
+
+        is_shift = (event.state & 0x0001) != 0
+        is_ctrl = (event.state & 0x0004) != 0
+
+        # Handle Custom Ctrl+Shift behavior cleanly
+        if is_shift and is_ctrl:
+            anchor_item = self.tree.focus() or (self.tree.selection()[-1] if self.tree.selection() else None)
+            if anchor_item:
+                items = self.tree.get_children("")
+                try:
+                    idx1 = items.index(anchor_item)
+                    idx2 = items.index(item)
+                    start = min(idx1, idx2)
+                    end = max(idx1, idx2)
+                    to_select = items[start:end+1]
+                    self.tree.selection_add(to_select)
+                except ValueError:
+                    self.tree.selection_add(item)
+            else:
+                self.tree.selection_add(item)
+                
+            self.tree.focus(item)
+            self._drag_items = []
+            self.on_tree_select(None) # Force UI preview update
+            return "break"
+            
+        if is_shift or is_ctrl:
+            self._drag_items = []
+            return # Let native Tkinter handle standard Shift or Ctrl click
+
+        # Normal click handling (prepares for drag without destroying selection)
+        self._drag_start_y = event.y
+        self._drag_active = False
+
+        sel = self.tree.selection()
+        if item in sel:
+            # Clicked on already selected item. Wait to see if it's a drag or a click!
+            self._drag_items = list(sel)
+            self._drag_items.sort(key=lambda x: self.tree.index(x))
+            self._pending_selection = item
+            return "break" # Prevent default deselection!
+        else:
+            # Clicked unselected item. Normal selection applies natively.
+            self._drag_items = [item]
+            self._pending_selection = None
+
+    def on_tree_motion(self, event):
+        """Handles the real-time visual Drag & Drop movement robustly."""
+        if not getattr(self, '_drag_items', None): 
+            return "break"
+
+        if not self._drag_active:
+            # Threshold of 5 pixels to confirm drag intention
+            if abs(event.y - self._drag_start_y) > 5:
+                self._drag_active = True
+                self.tree.configure(cursor="hand2")
+            else:
+                return "break"
+                
+        # 1. Temporarily detach dragged items so they don't interfere with drop index calculations
+        self.tree.detach(*self._drag_items)
+        
+        # 2. Identify the target index based on the remaining static items
+        static_items = self.tree.get_children("")
+        target_idx = len(static_items) # Default to dropping at the end
+        
+        for i, item in enumerate(static_items):
+            bbox = self.tree.bbox(item)
+            if not bbox: continue
+            if event.y < bbox[1] + (bbox[3] // 2):
+                target_idx = i
+                break
+                
+        # 3. Re-insert items at the calculated target index (this prevents any jumping/jittering)
+        for i, item in enumerate(self._drag_items):
+            self.tree.move(item, "", target_idx + i)
+            
+        # Ensure the dragged items remain visually selected
+        self.tree.selection_set(self._drag_items)
+            
+        return "break"
+
+    def on_tree_release(self, event):
+        """Handles completion of Drag & Drop or regular clicks (like item deletion)."""
+        if getattr(self, '_drag_active', False):
+            self.tree.configure(cursor="")
+            self._drag_active = False
+            
+            # If the user drags something, we switch the state to manual sorting
+            if self.sort_state != "manual":
+                self.sort_state = "manual"
+                self.btn_sort.config(text="Manual")
+                
+            self.sync_data_with_tree() # Crucial: Sync internal dictionary to new visual order
+            self.save_state()
+            self._drag_items = []
+            self._pending_selection = None
+            return "break"
+            
+        self._drag_items = []
+        
+        # If we didn't drag but had a pending selection (clicked an already selected item)
+        # We mimic standard OS behavior: Deselect others and select ONLY this one.
+        if getattr(self, '_pending_selection', None):
+            self.tree.selection_set(self._pending_selection)
+            self._pending_selection = None
+            self.on_tree_select(None)
+            return "break"
+
+        # Standard click handling (specifically for the deletion column)
+        region = self.tree.identify_region(event.x, event.y)
+        if region != "cell": return
+        column = self.tree.identify_column(event.x)
+        
+        if column == "#1":
+            item = self.tree.identify_row(event.y)
+            if item:
+                idx = self.tree.index(item)
+                self.delete_item_internal(item)
+                
+                children = self.tree.get_children()
+                if children:
+                    next_idx = min(idx, len(children) - 1)
+                    next_item = children[next_idx]
+                    self.tree.selection_set(next_item)
+                    self.tree.focus(next_item)
+                    self.on_tree_select(None)
+                else:
+                    self.clear_preview_state()
+                    
+                self.save_state()
+            return "break"
+
     def import_assets(self):
         files = filedialog.askopenfilenames(
             title="Import Images for Townscreen",
@@ -640,11 +861,18 @@ class TownscreenTab:
                 changed = True
                 
         if changed:
+            # If sorting is currently active, apply the sorting to the new items too
+            if self.sort_state != "manual":
+                self.apply_sort(reverse=(self.sort_state == "desc"))
+                self.sync_data_with_tree()
+                
             self.save_state()
+            
             if was_empty:
                 first_item = self.tree.get_children()[0]
                 self.tree.selection_set(first_item)
                 self.tree.focus(first_item)
+                self._last_clicked_item = first_item
                 self.on_tree_select(None)
                 self.center_view()
             
@@ -659,8 +887,21 @@ class TownscreenTab:
 
     def on_tree_select(self, event):
         sel = self.tree.selection()
-        if not sel: return
-        item = sel[0]
+        if not sel: 
+            self.clear_preview_state()
+            return
+            
+        # Display the image that the user's mouse physically clicked on last.
+        # This perfectly handles multi-selection visual tracking.
+        if getattr(self, '_last_clicked_item', None) in sel:
+            item = self._last_clicked_item
+        else:
+            focus_item = self.tree.focus()
+            if focus_item in sel:
+                item = focus_item
+            else:
+                item = sel[-1]
+            
         values = self.tree.item(item, "values")
         if values and len(values) > 1:
             fname = values[1]
@@ -684,29 +925,6 @@ class TownscreenTab:
             del self.imported_images[fname]
         self.tree.delete(item)
 
-    def on_tree_click(self, event):
-        region = self.tree.identify_region(event.x, event.y)
-        if region != "cell": return
-        column = self.tree.identify_column(event.x)
-        
-        if column == "#1":
-            item = self.tree.identify_row(event.y)
-            if item:
-                idx = self.tree.index(item)
-                self.delete_item_internal(item)
-                
-                children = self.tree.get_children()
-                if children:
-                    next_idx = min(idx, len(children) - 1)
-                    next_item = children[next_idx]
-                    self.tree.selection_set(next_item)
-                    self.tree.focus(next_item)
-                    self.on_tree_select(None)
-                else:
-                    self.clear_preview_state()
-                    
-                self.save_state()
-
     def on_delete_key(self, event):
         sel = self.tree.selection()
         if not sel: return
@@ -721,6 +939,7 @@ class TownscreenTab:
             next_item = children[next_idx]
             self.tree.selection_set(next_item)
             self.tree.focus(next_item)
+            self._last_clicked_item = next_item
             self.on_tree_select(None)
         else:
             self.clear_preview_state()
@@ -890,6 +1109,7 @@ class TownscreenTab:
             
         count = 0
         try:
+            # We iterate over the dictionary which was strictly ordered by sync_data_with_tree
             for fname, data in self.imported_images.items():
                 base_name = os.path.splitext(fname)[0]
                 fpath = data["path"]

@@ -5,7 +5,7 @@ import logging
 import re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from PIL import Image, ImageTk, ImageEnhance
+from PIL import Image, ImageTk, ImageEnhance, ImageOps
 
 # -------------------------------------------------------------------------
 # IMPORTS AUDIO
@@ -241,6 +241,69 @@ class ConfigTab:
         
         self.build_ui()
 
+    def prompt_reset(self):
+        """Ouvre une popup près de la souris pour confirmer la réinitialisation totale."""
+        x = self.parent.winfo_pointerx() + 15
+        y = self.parent.winfo_pointery() + 15
+        
+        top = tk.Toplevel(self.parent)
+        top.title("Reset")
+        top.geometry(f"+{x}+{y}")
+        top.transient(self.parent.winfo_toplevel())
+        top.grab_set()
+        
+        lbl = ttk.Label(top, text="⚠️ Are you sure you want to clear all fields?", font=("Arial", 10, "bold"))
+        lbl.pack(padx=20, pady=15)
+        
+        btn_f = ttk.Frame(top)
+        btn_f.pack(pady=(0, 15))
+        
+        def do_reset():
+            self.execute_reset()
+            top.destroy()
+            
+        ttk.Button(btn_f, text="Confirm", command=do_reset).pack(side="left", padx=10)
+        ttk.Button(btn_f, text="Cancel", command=top.destroy).pack(side="left", padx=10)
+
+    def execute_reset(self):
+        """Efface tout et réinitialise les placeholders par défaut."""
+        # 1. Reset Text Entries
+        for key, entry in self.app.entries.items():
+            if hasattr(entry, 'set_value'):
+                entry.set_value("")
+                
+        # 2. Reset Booleans / Variables
+        if "doubleWide" in self.app.vars: self.app.vars["doubleWide"].set(False)
+        if "special" in self.app.vars: self.app.vars["special"].set(False)
+        if "movement" in self.app.vars: self.app.vars["movement"].set("Ground")
+        if "is_upgraded" in self.app.vars: 
+            self.app.vars["is_upgraded"].set(False)
+            self.btn_upgrade.config(text="unupgraded")
+            
+        self.update_movement_icon()
+        
+        # 3. Reset Adv Map manual override
+        self.adv_map_manual_override = False
+        self.app.entries["adv_min"].config(state="disabled")
+        self.app.entries["adv_max"].config(state="disabled")
+        self.btn_edit_adv.config(state="normal")
+        self.app.entries["adv_min"].set_value("")
+        self.app.entries["adv_max"].set_value("")
+        
+        # 4. Audio paths
+        for k in ["snd_attack", "snd_defend", "snd_killed", "snd_shoot", "snd_move", "snd_wince", "snd_startMoving", "snd_endMoving"]:
+            p_key = k + "_path"
+            if p_key in self.app.vars:
+                self.app.vars[p_key].set("")
+        
+        # 5. Clear dynamic abilities
+        self.app.dynamic_abilities.clear()
+        self.refresh_active_abilities()
+        
+        # 6. Images reset
+        self._set_portrait_image("iconLarge", os.path.join(self.app.res_dir, "prtLarge.png"), "prtLarge.png")
+        self._set_portrait_image("iconSmall", os.path.join(self.app.res_dir, "prtSmall.png"), "prtSmall.png")
+
     def load_bonus_library(self):
         try:
             lib_path = os.path.join(self.app.current_dir, "library-bonusSystem.json")
@@ -364,9 +427,15 @@ class ConfigTab:
         self.btn_edit_adv.config(state="disabled")
 
     def build_ui(self):
-        header_frame = tk.Frame(self.parent, bg="#dddddd", padx=10, pady=10)
+        header_frame = tk.Frame(self.parent, bg="#dddddd", height=45)
         header_frame.pack(fill="x")
-        tk.Label(header_frame, text="VCMI CREATURE CONFIGURATION", font=("Arial", 14, "bold"), bg="#dddddd").pack()
+        header_frame.pack_propagate(False)
+        
+        btn_reset = tk.Button(header_frame, text="🔄 Reset All", bg="#ffcccc", cursor="hand2", command=self.prompt_reset)
+        btn_reset.place(relx=0.02, rely=0.5, anchor="w")
+        Tooltip(btn_reset, "Clear all fields and reset to default.")
+        
+        tk.Label(header_frame, text="VCMI CREATURE CONFIGURATION", font=("Arial", 14, "bold"), bg="#dddddd").place(relx=0.5, rely=0.5, anchor="center")
 
         content_frame = ttk.Frame(self.parent)
         content_frame.pack(fill="both", expand=True, padx=10, pady=10)
@@ -1211,11 +1280,38 @@ class ConfigTab:
         f = filedialog.askopenfilename(filetypes=[("Images", "*.png;*.bmp;*.jpg")])
         if not f: return
         try:
-            with Image.open(f) as img: w, h = img.size
-            target_key = key
-            if key == "iconSmall" and (w == 58 and h == 64): target_key = "iconLarge"
-            elif key == "iconLarge" and (w == 32 and h == 32): target_key = "iconSmall"
-            self._set_portrait_image(target_key, f, os.path.basename(f))
+            with Image.open(f) as img:
+                img = img.convert("RGBA")
+                w, h = img.size
+                
+                target_key = key
+                
+                # Check target matches with a +/- 2 pixel tolerance
+                is_large_match = (56 <= w <= 60 and 62 <= h <= 66)
+                is_small_match = (30 <= w <= 34 and 30 <= h <= 34)
+
+                # Swap logic if mistakenly clicked the wrong icon box
+                if key == "iconSmall" and is_large_match:
+                    target_key = "iconLarge"
+                elif key == "iconLarge" and is_small_match:
+                    target_key = "iconSmall"
+                
+                target_size = (58, 64) if target_key == "iconLarge" else (32, 32)
+                
+                # If dimensions are not strictly exact, resize and crop precisely
+                if (w, h) != target_size:
+                    # ImageOps.fit maintains aspect ratio, covers the target size, and crops the remainder evenly from center
+                    img = ImageOps.fit(img, target_size, method=Image.Resampling.LANCZOS)
+                    filename = f"cropped_{target_key}_{os.path.basename(f)}"
+                    cache_path = os.path.join(self.app.cache_dir, filename)
+                    img.save(cache_path, format="PNG")
+                    path_to_load = cache_path
+                    filename_to_set = filename
+                else:
+                    path_to_load = f
+                    filename_to_set = os.path.basename(f)
+
+            self._set_portrait_image(target_key, path_to_load, filename_to_set)
         except Exception as e: 
             logging.error(f"Error loading image: {e}", exc_info=True)
 

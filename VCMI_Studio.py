@@ -46,7 +46,7 @@ def handle_exception(exc_type, exc_value, exc_traceback):
     messagebox.showerror("Critical Error", f"An error occurred:\n\n{exc_value}\n\nPlease check the logs.")
 
 sys.excepthook = handle_exception
-logging.info("Starting initialization process for VCMI Studio (v0.67)...")
+logging.info("Starting initialization process for VCMI Studio (v0.68)...")
 
 # -------------------------------------------------------------------------
 # 3. SUBMODULE IMPORTS
@@ -164,7 +164,7 @@ class VCMICreatureEditor:
     def __init__(self, root):
         logging.info("Initializing UI Main Interface...")
         self.root = root
-        self.version = "0.67"
+        self.version = "0.68"
         self.root.title(f"VCMI Studio (v{self.version})")
         
         self.root.geometry("1300x850")
@@ -253,9 +253,9 @@ class VCMICreatureEditor:
         card_about = tk.LabelFrame(misc_content, text="  About  ", font=("Segoe UI", 12, "bold"), bg="#f2f2f2", fg="#333333", bd=1)
         card_about.pack(fill="x", pady=20, ipadx=10, ipady=15)
         
-        about_text = ("VCMI Studio is a tool designed to ease VCMI modding even more.\n\n"
-                      "The v0.67 version being the first public release, any feedbacks are welcomed.\n"
-                      "Link: https://github.com/Yuya-Noboru/VCMI-Studio")
+        about_text = ("VCMI Studio is an all-in-one modding suite for Heroes 3 VCMI.\n\n"
+                      "It is designed to help modders in various ways : from JSON configuration file generation to sprite editing.\n"
+                      "GitHub: https://github.com/Yuya-Noboru/VCMI-Studio, Forum : https://forum.vcmi.eu/t/vcmi-studio-project/6760")
         tk.Label(card_about, text=about_text, justify="left", bg="#f2f2f2", font=("Segoe UI", 11), fg="#555555").pack(anchor="w", pady=5, padx=20)
 
         # 5. Submodules Instantiation
