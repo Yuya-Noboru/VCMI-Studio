@@ -46,7 +46,7 @@ def handle_exception(exc_type, exc_value, exc_traceback):
     messagebox.showerror("Critical Error", f"An error occurred:\n\n{exc_value}\n\nPlease check the logs.")
 
 sys.excepthook = handle_exception
-logging.info("Starting initialization process for VCMI Studio (v0.68)...")
+logging.info("Starting initialization process for VCMI Studio (v0.69)...")
 
 # -------------------------------------------------------------------------
 # 3. SUBMODULE IMPORTS
@@ -164,7 +164,7 @@ class VCMICreatureEditor:
     def __init__(self, root):
         logging.info("Initializing UI Main Interface...")
         self.root = root
-        self.version = "0.68"
+        self.version = "0.69"
         self.root.title(f"VCMI Studio (v{self.version})")
         
         self.root.geometry("1300x850")

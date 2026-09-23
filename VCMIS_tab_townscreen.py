@@ -1,5 +1,8 @@
 import os
 import logging
+import zipfile
+import io
+import json
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, colorchooser
 from PIL import Image, ImageTk, ImageOps, ImageFilter, ImageChops, ImageDraw
@@ -24,6 +27,7 @@ class TownscreenTab:
         self.current_preview = None
         self.current_filepath = None
         self.current_filename = None
+        self.notification_job = None
         
         # Sorting State
         self.sort_state = "manual" # "manual", "asc", "desc"
@@ -60,6 +64,13 @@ class TownscreenTab:
         self.setup_global_bindings()
         self.save_state()
 
+    def show_notification(self, message, duration=5000):
+        """Affiche un message temporaire non intrusif en haut de l'aperçu."""
+        self.lbl_notification.config(text=message)
+        if self.notification_job:
+            self.parent.after_cancel(self.notification_job)
+        self.notification_job = self.parent.after(duration, lambda: self.lbl_notification.config(text=""))
+
     def build_ui(self):
         self.parent.columnconfigure(0, weight=0, minsize=260)
         self.parent.columnconfigure(1, weight=1)
@@ -71,23 +82,28 @@ class TownscreenTab:
         left_panel = ttk.Frame(self.parent, relief="groove")
         left_panel.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
         
+        proj_frame = ttk.Frame(left_panel)
+        proj_frame.pack(fill="x", padx=5, pady=(5, 0))
+        ttk.Button(proj_frame, text="Import Project", command=self.import_project).pack(side="left", fill="x", expand=True, padx=2)
+        ttk.Button(proj_frame, text="Export Project", command=self.export_project).pack(side="left", fill="x", expand=True, padx=2)
+        
+        ttk.Separator(left_panel, orient="horizontal").pack(fill="x", padx=5, pady=5)
+        
         btn_frame = ttk.Frame(left_panel)
-        btn_frame.pack(fill="x", padx=5, pady=5)
+        btn_frame.pack(fill="x", padx=5, pady=(0, 5))
         ttk.Button(btn_frame, text="Import", command=self.import_assets).pack(side="left", fill="x", expand=True, padx=2)
         ttk.Button(btn_frame, text="Export", command=self.export_assets).pack(side="left", fill="x", expand=True, padx=2)
         ttk.Button(btn_frame, text="Clear Assets", command=self.clear_assets).pack(side="left", fill="x", expand=True, padx=2)
         
-        sort_frame = ttk.Frame(left_panel)
-        sort_frame.pack(fill="x", padx=5, pady=(0, 2))
-        ttk.Label(sort_frame, text="Sort Name:").pack(side="left")
-        self.btn_sort = ttk.Button(sort_frame, text="Manual", command=self.cycle_sort)
-        self.btn_sort.pack(side="right", fill="x", expand=True, padx=(5, 0))
-        
+        # Treeview Configuration
         self.tree = ttk.Treeview(left_panel, columns=("del", "name"), show="headings", selectmode="extended")
         self.tree.heading("del", text="✖")
         self.tree.column("del", width=35, stretch=False, anchor="center")
-        self.tree.heading("name", text="Filename")
+        
+        # Clickable header for sorting (anchored west to avoid text jump when adding the arrow)
+        self.tree.heading("name", text="Filename   ", anchor="w", command=self.cycle_sort)
         self.tree.column("name", anchor="w")
+        
         self.tree.pack(fill="both", expand=True, padx=5, pady=5)
         
         scroll_y = ttk.Scrollbar(self.tree, orient="vertical", command=self.tree.yview)
@@ -125,6 +141,9 @@ class TownscreenTab:
         ttk.Radiobutton(mode_frame, text="Townscreen", variable=self.view_mode, value="townscreen", command=self.refresh_preview).pack(side="left", padx=5)
         ttk.Radiobutton(mode_frame, text="Building Area", variable=self.view_mode, value="area", command=self.refresh_preview).pack(side="left", padx=5)
         ttk.Radiobutton(mode_frame, text="Building Border", variable=self.view_mode, value="border", command=self.refresh_preview).pack(side="left", padx=5)
+        
+        self.lbl_notification = ttk.Label(top_ctrl_frame, text="", font=("Arial", 9, "italic"), foreground="#888888")
+        self.lbl_notification.pack(side="left", padx=15)
         
         zoom_frame = ttk.Frame(top_ctrl_frame)
         zoom_frame.pack(side="right")
@@ -265,6 +284,120 @@ class TownscreenTab:
         return self.app.notebook.index(self.app.notebook.select()) == 2
 
     # -------------------------------------------------------------------------
+    # PROJECT IMPORT / EXPORT
+    # -------------------------------------------------------------------------
+    def export_project(self):
+        if not self.imported_images:
+            messagebox.showinfo("Export Project", "No project data to export.")
+            return
+
+        f = filedialog.asksaveasfilename(defaultextension=".vsp", filetypes=[("VCMI Townscreen Project", "*.vsp")])
+        if not f: return
+
+        try:
+            with zipfile.ZipFile(f, 'w', zipfile.ZIP_DEFLATED) as zf:
+                tree_order = []
+                for item in self.tree.get_children():
+                    values = self.tree.item(item, "values")
+                    if values and len(values) > 1:
+                        tree_order.append(values[1])
+
+                meta = {}
+                for fname, data in self.imported_images.items():
+                    meta[fname] = {
+                        "ox": data.get("ox", 0),
+                        "oy": data.get("oy", 0),
+                        "has_mask": data.get("custom_mask") is not None
+                    }
+
+                    # Write base image to zip
+                    try:
+                        with open(data["path"], "rb") as img_file:
+                            zf.writestr(f"images/{fname}", img_file.read())
+                    except Exception as e:
+                        logging.error(f"Could not read {data['path']} for export: {e}")
+
+                    # Write mask to zip if exists
+                    if data.get("custom_mask") is not None:
+                        mask_bytes = io.BytesIO()
+                        data["custom_mask"].save(mask_bytes, format="PNG")
+                        zf.writestr(f"masks/{fname}_mask.png", mask_bytes.getvalue())
+
+                state = {
+                    "tree": tree_order,
+                    "meta": meta
+                }
+                zf.writestr("project.json", json.dumps(state))
+
+            self.show_notification("Project successfully exported (.vsp).")
+        except Exception as e:
+            logging.error(f"Export project error: {e}", exc_info=True)
+            messagebox.showerror("Error", str(e))
+
+    def import_project(self):
+        f = filedialog.askopenfilename(filetypes=[("VCMI Townscreen Project", "*.vsp")])
+        if not f: return
+
+        try:
+            with zipfile.ZipFile(f, 'r') as zf:
+                state = json.loads(zf.read("project.json"))
+                meta = state.get("meta", {})
+                tree_order = state.get("tree", [])
+
+                # Clear current assets before importing
+                self.imported_images.clear()
+                self.tree.delete(*self.tree.get_children())
+                self.clear_preview_state()
+                self.sort_state = "manual"
+                self.tree.heading("name", text="Filename   ")
+                self.manual_order_snapshot.clear()
+
+                for fname, m_data in meta.items():
+                    img_data = zf.read(f"images/{fname}")
+                    
+                    # Save to cache dir so it has a valid physical path to read from later
+                    cache_img_path = os.path.join(self.app.cache_dir, f"ts_{fname}")
+                    with open(cache_img_path, "wb") as f_out:
+                        f_out.write(img_data)
+
+                    custom_mask = None
+                    if m_data.get("has_mask"):
+                        mask_data = zf.read(f"masks/{fname}_mask.png")
+                        custom_mask = Image.open(io.BytesIO(mask_data)).copy()
+
+                    self.imported_images[fname] = {
+                        "path": cache_img_path,
+                        "ox": m_data.get("ox", 0),
+                        "oy": m_data.get("oy", 0),
+                        "custom_mask": custom_mask
+                    }
+
+                # Reconstruct tree in exact order
+                for fname in tree_order:
+                    if fname in self.imported_images:
+                        self.tree.insert("", "end", values=("❌", fname), tags=("file",))
+                
+                # If there are any missing from the tree order but present in meta
+                for fname in meta.keys():
+                    if fname not in tree_order:
+                        self.tree.insert("", "end", values=("❌", fname), tags=("file",))
+
+            self.save_state()
+            children = self.tree.get_children()
+            if children:
+                first_item = children[0]
+                self.tree.selection_set(first_item)
+                self.tree.focus(first_item)
+                self._last_clicked_item = first_item
+                self.on_tree_select(None)
+                self.center_view()
+                
+            self.show_notification("Project successfully imported.")
+        except Exception as e:
+            logging.error(f"Import project error: {e}", exc_info=True)
+            messagebox.showerror("Error", f"Failed to load project.\n{e}")
+
+    # -------------------------------------------------------------------------
     # SORTING LOGIC
     # -------------------------------------------------------------------------
     def cycle_sort(self):
@@ -273,19 +406,19 @@ class TownscreenTab:
         
         if self.sort_state == "manual":
             self.sort_state = "asc"
-            self.btn_sort.config(text="A-Z")
+            self.tree.heading("name", text="Filename ▲")
             # Snapshot of current manual order before breaking it
             self.manual_order_snapshot = [self.tree.item(i, "values")[1] for i in children]
             self.apply_sort(reverse=False)
             
         elif self.sort_state == "asc":
             self.sort_state = "desc"
-            self.btn_sort.config(text="Z-A")
+            self.tree.heading("name", text="Filename ▼")
             self.apply_sort(reverse=True)
             
         elif self.sort_state == "desc":
             self.sort_state = "manual"
-            self.btn_sort.config(text="Manual")
+            self.tree.heading("name", text="Filename   ")
             self.restore_manual_order()
             
         self.sync_data_with_tree()
@@ -458,7 +591,7 @@ class TownscreenTab:
     def restore_state(self, state):
         # Rétablit également le tri sur Manual puisqu'on restaure un ordre précis
         self.sort_state = "manual"
-        self.btn_sort.config(text="Manual")
+        self.tree.heading("name", text="Filename   ")
         
         self.imported_images.clear()
         self.tree.delete(*self.tree.get_children())
@@ -496,6 +629,7 @@ class TownscreenTab:
         self.current_filepath = None
         self.current_filename = None
         self.current_preview = None
+        self._last_clicked_item = None
         
         self.ignore_offset_trace = True
         self.offset_x_var.set(0)
@@ -801,7 +935,7 @@ class TownscreenTab:
             # If the user drags something, we switch the state to manual sorting
             if self.sort_state != "manual":
                 self.sort_state = "manual"
-                self.btn_sort.config(text="Manual")
+                self.tree.heading("name", text="Filename   ")
                 
             self.sync_data_with_tree() # Crucial: Sync internal dictionary to new visual order
             self.save_state()
@@ -883,6 +1017,9 @@ class TownscreenTab:
         self.imported_images.clear()
         self.tree.delete(*self.tree.get_children())
         self.clear_preview_state()
+        self.sort_state = "manual"
+        self.tree.heading("name", text="Filename   ")
+        self.manual_order_snapshot.clear()
         self.save_state()
 
     def on_tree_select(self, event):
@@ -1128,7 +1265,17 @@ class TownscreenTab:
                     base_img_processed = base_img
                     
                 img_standard = self.get_shifted_image(base_img_processed, ox, oy, force_transp=False)
-                img_standard.save(os.path.join(dest, f"{base_name}.png"))
+                
+                # Handling name conflicts for exporting multiple images with the same base name
+                export_base = base_name
+                c = 1
+                while os.path.exists(os.path.join(dest, f"{export_base}.png")) or \
+                      os.path.exists(os.path.join(dest, f"{export_base}-area.png")) or \
+                      os.path.exists(os.path.join(dest, f"{export_base}-border.png")):
+                    export_base = f"{base_name}_{c}"
+                    c += 1
+                
+                img_standard.save(os.path.join(dest, f"{export_base}.png"))
                 
                 # Setup Mask for Area/Border
                 if custom_mask:
@@ -1143,11 +1290,11 @@ class TownscreenTab:
                 
                 # 2. Save Building Area version
                 area_img = self.generate_area_image(mask_shifted, self.fill_color.get(), self.bg_color.get(), transparent_bg=remove_bg)
-                area_img.save(os.path.join(dest, f"{base_name}-area.png"))
+                area_img.save(os.path.join(dest, f"{export_base}-area.png"))
                 
                 # 3. Save Building Border version
                 border_img = self.generate_border_image(mask_shifted, self.fill_color.get(), self.bg_color.get(), transparent_bg=remove_bg)
-                border_img.save(os.path.join(dest, f"{base_name}-border.png"))
+                border_img.save(os.path.join(dest, f"{export_base}-border.png"))
                 
                 count += 1
                 
