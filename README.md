@@ -10,7 +10,7 @@ The app has several independent tabs which all serve different purposes (tab nam
 
 The Sprite Editor is directly inspired by DEF tool, and allows you to manage frame sequences with a similar real-time playback.
 
-It also comes with an automated 256-color palette generation and bulk HSL color adjustments to easily recolor your sprites. You can also remove the cyan background in a few clicks.
+It also comes with an automated 256-color palette generation and bulk HSL color adjustments to easily recolor your sprites. You can also remove the cyan background in a few clicks. Also, you can enable/disable your modifications or uses duo view to easily compare before and after sprites.
 
 You can import/export projects and color palettes. “Generate JSON” generates the animation’s JSON file.
 
@@ -26,7 +26,8 @@ It comes with a text editor so you can manually edit the JSON on-the-go.
 ![Townscreen Editor image](https://forum.vcmi.eu/uploads/default/original/2X/f/f2a5c0cf3512bc470715517b1a9ce3fe73a8141c.png)
 
 This townscreen tool lets you bulk-remove backgrounds, and generate building area and building border sprites.
-There’s a built-in mask editor so you can draw the area/border. You can change sprite opacity to help you do so.
+
+There’s a built-in mask editor so you can draw the area/border, and you can change the sprite opacity to help you do so. You can use the shift key to help you draw like Photoshop, and use mouse-wheel to zoom in/out or drag the preview screen.
 
 
 ## Install
