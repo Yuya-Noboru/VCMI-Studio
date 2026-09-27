@@ -1,221 +1,20 @@
 import os
-import re
+import json
+import logging
+import threading
+import concurrent.futures
 import math
 import colorsys
-import logging
-import json
-import zipfile
-import io
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, colorchooser
-from PIL import Image, ImageTk, ImageOps, ImageChops
+from PIL import Image, ImageTk, ImageChops
 
-# -------------------------------------------------------------------------
-# HELPER CLASSES FOR SPRITES & UI
-# -------------------------------------------------------------------------
-class PlaceholderEntry(ttk.Entry):
-    def __init__(self, container, placeholder, *args, **kwargs):
-        super().__init__(container, *args, **kwargs)
-        self.placeholder = placeholder
-        self.is_placeholder = True
-        self.insert("0", self.placeholder)
-        self.bind("<FocusIn>", self._clear_placeholder)
-        self.bind("<FocusOut>", self._add_placeholder)
-        self.config(foreground="grey")
-
-    def _clear_placeholder(self, e):
-        if self.is_placeholder:
-            self.delete("0", "end")
-            self.config(foreground="black")
-            self.is_placeholder = False
-
-    def _add_placeholder(self, e):
-        if not self.get():
-            self.is_placeholder = True
-            self.insert("0", self.placeholder)
-            self.config(foreground="grey")
-
-    def get_value(self):
-        return "" if self.is_placeholder else self.get()
-
-    def set_value(self, text):
-        self.delete("0", "end")
-        if text:
-            self.is_placeholder = False
-            self.insert("0", text)
-            self.config(foreground="black")
-        else:
-            self.is_placeholder = True
-            self.insert("0", self.placeholder)
-            self.config(foreground="grey")
+from VCMIS_ui_components import PlaceholderEntry, AdvancedTreeview, PopupColorEditor, NotificationMixin, CanvasViewerMixin
+from VCMIS_utils_project import HistoryManager, ProjectManager
+from VCMIS_utils_image import hex_to_rgb
 
 
-class YuyaTreeview(ttk.Treeview):
-    def __init__(self, master, **kwargs):
-        super().__init__(master, **kwargs)
-        self.bind("<ButtonPress-1>", self.on_press)
-        self.bind("<B1-Motion>", self.on_drag)
-        self.bind("<ButtonRelease-1>", self.on_drop)
-        # Handle explicitly Ctrl+Shift+Click to act like Shift+Click
-        self.bind("<Control-Shift-Button-1>", lambda e: self.event_generate("<Shift-Button-1>", x=e.x, y=e.y))
-        
-        self.drag_item = None
-        self.start_x = 0
-        self.start_y = 0
-
-    def on_press(self, event):
-        item = self.identify_row(event.y)
-        self.start_x = event.x
-        self.start_y = event.y
-        if item:
-            tags = self.item(item, "tags")
-            if "file" in tags: 
-                self.drag_item = item
-
-    def on_drag(self, event):
-        if self.drag_item: 
-            # Seuil de mouvement de 5 pixels pour déclencher le drag.
-            if abs(event.x - self.start_x) > 5 or abs(event.y - self.start_y) > 5:
-                self.configure(cursor="hand2")
-
-    def on_drop(self, event):
-        self.configure(cursor="")
-        if not self.drag_item: return
-        
-        if abs(event.x - self.start_x) <= 5 and abs(event.y - self.start_y) <= 5:
-            self.drag_item = None
-            return
-
-        target = self.identify_row(event.y)
-        if target and target != self.drag_item:
-            sel = self.selection()
-            if self.drag_item in sel:
-                items_to_move = sel
-            else:
-                items_to_move = [self.drag_item]
-                
-            ttags = self.item(target, "tags")
-            if "group" in ttags:
-                for it in items_to_move:
-                    if "file" in self.item(it, "tags"):
-                        self.move(it, target, "end")
-            elif "file" in ttags:
-                parent = self.parent(target)
-                idx = self.index(target)
-                for it in items_to_move:
-                    if "file" in self.item(it, "tags"):
-                        self.move(it, parent, idx)
-                        idx += 1
-            self.event_generate("<<TreeOrderChanged>>")
-        self.drag_item = None
-
-
-class PopupColorEditor(tk.Toplevel):
-    def __init__(self, parent, index, initial_rgba, on_update_cb, on_apply_cb, on_cancel_cb):
-        super().__init__(parent)
-        self.overrideredirect(True)
-        self.attributes('-topmost', True)
-        self.config(bg="#f0f0f0", bd=2, relief="raised")
-        self.index = index; self.initial_rgba = initial_rgba; self.current_rgba = list(initial_rgba)
-        self.on_update = on_update_cb; self.on_apply = on_apply_cb; self.on_cancel = on_cancel_cb
-        self.ignore_event = False 
-        self.setup_ui(); self.sync_ui_from_rgba()
-        self.bind("<Button-1>", self.on_click_inside); self.bind_all("<Button-1>", self.on_click_outside, add="+"); self.focus_force()
-
-    def setup_ui(self):
-        top = tk.Frame(self, bg="#f0f0f0"); top.pack(fill="x", padx=5, pady=5)
-        tk.Label(top, text="#", bg="#f0f0f0", font=("Consolas", 10, "bold")).pack(side="left")
-        self.hex_var = tk.StringVar(); self.hex_var.trace("w", self.on_hex_change)
-        tk.Entry(top, textvariable=self.hex_var, width=8, font=("Consolas", 10)).pack(side="left")
-        self.swatch = tk.Label(top, width=6, relief="sunken", bg="black"); self.swatch.pack(side="right", padx=(10,0))
-        sliders = tk.Frame(self, bg="#f0f0f0"); sliders.pack(fill="x", padx=5)
-        self.rgb_vars = []
-        for i, lab in enumerate("RGB"):
-            f = tk.Frame(sliders, bg="#f0f0f0"); f.pack(fill="x", pady=1)
-            tk.Label(f, text=lab, width=2, bg="#f0f0f0", font=("Arial", 8)).pack(side="left")
-            var = tk.IntVar(); self.rgb_vars.append(var)
-            s = tk.Scale(f, from_=0, to=255, orient="horizontal", variable=var, showvalue=0, bg="#f0f0f0", length=120, command=lambda v, c=i: self.on_rgb_slide())
-            s.pack(side="left", padx=2); s.bind("<Double-Button-1>", lambda e, c=i: self.reset_channel(c))
-            e = tk.Entry(f, textvariable=var, width=4, font=("Arial", 8)); e.pack(side="left"); e.bind("<Return>", lambda e: self.on_rgb_slide())
-        ttk.Separator(self, orient="horizontal").pack(fill="x", pady=5)
-        self.hsl_vars = []
-        for i, (lab, maxi) in enumerate([("H", 360), ("S", 100), ("L", 100)]):
-            f = tk.Frame(sliders, bg="#f0f0f0"); f.pack(fill="x", pady=1)
-            tk.Label(f, text=lab, width=2, bg="#f0f0f0", font=("Arial", 8)).pack(side="left")
-            var = tk.IntVar(); self.hsl_vars.append(var)
-            s = tk.Scale(f, from_=0, to=maxi, orient="horizontal", variable=var, showvalue=0, bg="#f0f0f0", length=120, command=lambda v: self.on_hsl_slide())
-            s.pack(side="left", padx=2); s.bind("<Double-Button-1>", lambda e, c=i: self.reset_hsl())
-            e = tk.Entry(f, textvariable=var, width=4, font=("Arial", 8)); e.pack(side="left"); e.bind("<Return>", lambda e: self.on_hsl_slide())
-        ttk.Separator(self, orient="horizontal").pack(fill="x", pady=5)
-        f = tk.Frame(sliders, bg="#f0f0f0"); f.pack(fill="x", pady=1)
-        tk.Label(f, text="A", width=2, bg="#f0f0f0", font=("Arial", 8)).pack(side="left")
-        self.alpha_var = tk.IntVar(value=100)
-        s = tk.Scale(f, from_=0, to=100, orient="horizontal", variable=self.alpha_var, showvalue=0, bg="#f0f0f0", length=120, command=lambda v: self.on_alpha_slide())
-        s.pack(side="left", padx=2); s.bind("<Double-Button-1>", lambda e: self.reset_alpha())
-        e = tk.Entry(f, textvariable=self.alpha_var, width=4, font=("Arial", 8)); e.pack(side="left"); e.bind("<Return>", lambda e: self.on_alpha_slide())
-        btns = tk.Frame(self, bg="#f0f0f0"); btns.pack(fill="x", padx=5, pady=10)
-        tk.Button(btns, text="Apply", bg="#ccffcc", command=self.do_apply, width=8).pack(side="left", padx=2)
-        tk.Button(btns, text="Cancel", command=self.do_cancel, width=8).pack(side="right", padx=2)
-
-    def sync_ui_from_rgba(self):
-        self.ignore_event = True
-        r, g, b, a = self.current_rgba
-        for i in range(3): self.rgb_vars[i].set(self.current_rgba[i])
-        h_str = f"{r:02x}{g:02x}{b:02x}".upper(); self.hex_var.set(h_str); self.swatch.config(bg=f"#{h_str}")
-        h, l, s = colorsys.rgb_to_hls(r/255.0, g/255.0, b/255.0)
-        self.hsl_vars[0].set(int(h * 360)); self.hsl_vars[1].set(int(s * 100)); self.hsl_vars[2].set(int(l * 100))
-        self.alpha_var.set(int((a / 255.0) * 100))
-        self.ignore_event = False
-
-    def on_rgb_slide(self):
-        if self.ignore_event: return
-        self.current_rgba = [v.get() for v in self.rgb_vars] + [self.current_rgba[3]]
-        self.sync_ui_from_rgba(); self.on_update(self.index, tuple(self.current_rgba))
-
-    def on_hsl_slide(self):
-        if self.ignore_event: return
-        h = self.hsl_vars[0].get() / 360.0; s = self.hsl_vars[1].get() / 100.0; l = self.hsl_vars[2].get() / 100.0
-        r, g, b = colorsys.hls_to_rgb(h, l, s)
-        self.current_rgba = [int(r*255), int(g*255), int(b*255), self.current_rgba[3]]
-        self.sync_ui_from_rgba(); self.on_update(self.index, tuple(self.current_rgba))
-
-    def on_alpha_slide(self):
-        if self.ignore_event: return
-        a_val = int((self.alpha_var.get() / 100.0) * 255)
-        self.current_rgba[3] = a_val
-        self.on_update(self.index, tuple(self.current_rgba))
-
-    def on_hex_change(self, *args):
-        if self.ignore_event: return
-        val = self.hex_var.get()
-        if len(val) == 6:
-            try:
-                r, g, b = int(val[0:2], 16), int(val[2:4], 16), int(val[4:6], 16)
-                self.current_rgba = [r, g, b, self.current_rgba[3]]
-                self.sync_ui_from_rgba(); self.on_update(self.index, tuple(self.current_rgba))
-            except: pass
-
-    def reset_channel(self, idx):
-        self.current_rgba[idx] = self.initial_rgba[idx]; self.sync_ui_from_rgba(); self.on_update(self.index, tuple(self.current_rgba))
-    def reset_hsl(self):
-        a = self.current_rgba[3]; self.current_rgba = list(self.initial_rgba); self.current_rgba[3] = a
-        self.sync_ui_from_rgba(); self.on_update(self.index, tuple(self.current_rgba))
-    def reset_alpha(self):
-        self.current_rgba[3] = self.initial_rgba[3]; self.sync_ui_from_rgba(); self.on_update(self.index, tuple(self.current_rgba))
-    def on_click_inside(self, event): return "break" 
-    def on_click_outside(self, event):
-        try:
-            if event.widget.winfo_toplevel() != self: self.do_cancel()
-        except: pass
-    def do_apply(self):
-        self.unbind_all("<Button-1>"); self.on_apply(self.index, tuple(self.current_rgba)); self.destroy()
-    def do_cancel(self):
-        self.unbind_all("<Button-1>"); self.on_cancel(self.index); self.destroy()
-
-# -------------------------------------------------------------------------
-# TAB SPRITES CLASS
-# -------------------------------------------------------------------------
-class SpriteEditorTab:
+class SpriteEditorTab(NotificationMixin, CanvasViewerMixin):
     def __init__(self, parent, app):
         self.parent = parent
         self.app = app
@@ -224,9 +23,16 @@ class SpriteEditorTab:
         self.palette_data = [] 
         self.palette_alphas = [] 
         
+        self.original_palette_data = []
+        self.original_palette_alphas = []
+        
+        self.unsaved_color_edits = 0
+        self.unsaved_reorders = 0
+        
         self.is_playing = False
         self.current_frame_list = []
         self.current_frame_index = 0
+        self.anim_job = None
         
         self.zoom_level = 1.0
         self.zoom_auto_var = tk.BooleanVar(value=False)
@@ -237,465 +43,439 @@ class SpriteEditorTab:
         self.palette_snapshot = None 
         self.active_popup = None 
         
-        self.history = []
-        self.history_index = -1
+        self.remove_bg_var = tk.BooleanVar(value=False)
+        self.transp_color = tk.StringVar(value="#00FFFF")
+        self.eyedropper_mode = False
+        self.palette_picker_mode = False
         
+        self.preview_original_var = tk.BooleanVar(value=False)
+        self.duo_view_var = tk.BooleanVar(value=False)
+        
+        self.history_mgr = HistoryManager(30, self.restore_state)
         self.last_open_dir = os.path.expanduser("~")
-        
         self.preset_files = {}
         self.clipboard_frames = []
-        
         self.notification_job = None
         
         self.build_ui()
 
-    def show_notification(self, message, duration=15000):
-        """Affiche un message temporaire non intrusif en bas de l'écran."""
-        self.lbl_notification.config(text=message)
-        if self.notification_job:
-            self.parent.after_cancel(self.notification_job)
-        self.notification_job = self.parent.after(duration, lambda: self.lbl_notification.config(text=""))
+    def has_unsaved_changes(self):
+        return self.unsaved_color_edits >= 1 or self.unsaved_reorders >= 10
 
-    # --- PROJECT IMPORT / EXPORT METHODS ---
+    def undo(self, event=None): self.history_mgr.undo()
+    def redo(self, event=None): self.history_mgr.redo()
+
+    # ---- Implémentation requise par CanvasViewerMixin ----
+    def is_tab_active(self): 
+        return self.app.notebook.index(self.app.notebook.select()) == 2
+    def can_zoom(self): 
+        return bool(self.current_frame_list)
+    def on_zoom_changed(self): 
+        self.render_current()
+    # -----------------------------------------------------
+
     def export_project(self):
         if not self.anim_data:
             messagebox.showinfo("Export", "No project data to export.")
             return
-            
         f = filedialog.asksaveasfilename(defaultextension=".vsp", filetypes=[("VCMI Sprite Project", "*.vsp")])
         if not f: return
-        
         try:
-            with zipfile.ZipFile(f, 'w', zipfile.ZIP_DEFLATED) as zf:
-                state = {
-                    "rgb": list(self.palette_data),
-                    "alpha": list(self.palette_alphas) if self.palette_alphas else [255]*256,
-                    "tree": self.get_tree_state(),
-                    "project_name": self.proj_name_entry.get_value()
-                }
-                zf.writestr("project.json", json.dumps(state))
-
-                pal_img = Image.new("P", (1,1))
-                pal_img.putpalette(self.palette_data)
-
-                for fname, d in self.anim_data.items():
-                    idx_bytes = io.BytesIO()
-                    d["idx"].putpalette(self.palette_data) 
-                    d["idx"].save(idx_bytes, format="PNG")
-                    zf.writestr(f"images/{fname}_idx.png", idx_bytes.getvalue())
-
-                    alpha_bytes = io.BytesIO()
-                    d["alpha"].save(alpha_bytes, format="PNG")
-                    zf.writestr(f"images/{fname}_alpha.png", alpha_bytes.getvalue())
-                    
+            full_pal = list(self.palette_data)
+            pad_col = self.palette_data[:3] if self.palette_data else [0,0,0]
+            while len(full_pal) < 768: full_pal.extend(pad_col)
+            
+            full_alphas = list(self.palette_alphas) if self.palette_alphas else [255] * (len(self.palette_data) // 3)
+            while len(full_alphas) < 256: full_alphas.append(255)
+            
+            ProjectManager.export_sprite_vsp(f, full_pal, full_alphas, ProjectManager.get_tree_state(self.tree), self.proj_name_entry.get_value(), self.anim_data)
+            self.unsaved_color_edits = 0; self.unsaved_reorders = 0
             self.show_notification("Projet exporté avec succès (.vsp).")
         except Exception as e:
             logging.error(f"Export project error: {e}", exc_info=True)
-            messagebox.showerror("Error", str(e))
+            messagebox.showerror("Error", f"Export project error:\n{e}")
 
     def import_project(self):
         f = filedialog.askopenfilename(filetypes=[("VCMI Sprite Project", "*.vsp")])
         if not f: return
-        
         try:
-            with zipfile.ZipFile(f, 'r') as zf:
-                state = json.loads(zf.read("project.json"))
-
-                self.palette_data = state.get("rgb", [])
-                self.palette_alphas = state.get("alpha", [])
-
-                pname = state.get("project_name", "")
-                self.proj_name_entry.set_value(pname)
-
-                self.anim_data.clear()
+            state, anim_data = ProjectManager.import_sprite_vsp(f)
+            self.anim_data.clear(); self.anim_data.update(anim_data)
+            self.proj_name_entry.set_value(state.get("project_name", ""))
+            
+            raw_pal = list(state.get("rgb", []))
+            raw_alpha = list(state.get("alpha", []))
+            
+            valid_len = len(raw_pal)
+            while valid_len >= 3 and raw_pal[valid_len-3:valid_len] == raw_pal[:3]:
+                valid_len -= 3
                 
-                for item in zf.namelist():
-                    if item.startswith("images/") and item.endswith("_idx.png"):
-                        fname = item[len("images/"): -len("_idx.png")]
-                        
-                        idx_data = zf.read(item)
-                        alpha_data = zf.read(f"images/{fname}_alpha.png")
+            if valid_len == 0 and len(raw_pal) > 0: valid_len = 3 
+            
+            state["rgb"] = raw_pal[:valid_len]
+            state["alpha"] = raw_alpha[:valid_len // 3]
 
-                        idx_img = Image.open(io.BytesIO(idx_data)).copy()
-                        alpha_img = Image.open(io.BytesIO(alpha_data)).copy()
-
-                        self.anim_data[fname] = {"idx": idx_img, "alpha": alpha_img}
-
-                self.restore_state(state)
-                self.save_state()
-                
+            self.restore_state(state); self.save_state()
+            
+            self.original_palette_data = list(state.get("rgb", []))
+            self.original_palette_alphas = list(state.get("alpha", []))
+            self.unsaved_color_edits = 0; self.unsaved_reorders = 0
+            
             self.show_notification("Projet importé avec succès.")
         except Exception as e:
             logging.error(f"Import project error: {e}", exc_info=True)
             messagebox.showerror("Error", f"Failed to load project.\n{e}")
 
-    # --- STATE MANAGEMENT (UNDO/REDO) ---
-    def get_tree_state(self):
-        state = []
-        for group in self.tree.get_children(""):
-            g_dict = {
-                "text": self.tree.item(group, "text"),
-                "tags": self.tree.item(group, "tags"),
-                "open": self.tree.item(group, "open"),
-                "children": []
-            }
-            for f_node in self.tree.get_children(group):
-                g_dict["children"].append({
-                    "text": self.tree.item(f_node, "text"),
-                    "tags": self.tree.item(f_node, "tags")
-                })
-            state.append(g_dict)
-        return state
-
     def save_state(self, event=None):
-        if self.history_index < len(self.history) - 1:
-            self.history = self.history[:self.history_index+1]
-            
-        state = {
-            "rgb": list(self.palette_data) if hasattr(self, 'palette_data') else [],
-            "alpha": list(self.palette_alphas) if hasattr(self, 'palette_alphas') and self.palette_alphas else [255]*256,
-            "tree": self.get_tree_state()
-        }
-        
-        self.history.append(state)
-        self.history_index += 1
-        if len(self.history) > 50:
-            self.history.pop(0)
-            self.history_index -= 1
-
-    def undo(self, event=None):
-        if self.history_index > 0:
-            self.history_index -= 1
-            self.restore_state(self.history[self.history_index])
-    
-    def redo(self, event=None):
-        if self.history_index < len(self.history) - 1:
-            self.history_index += 1
-            self.restore_state(self.history[self.history_index])
+        self.history_mgr.save_state({"rgb": list(self.palette_data), "alpha": list(self.palette_alphas) if self.palette_alphas else [255]*(len(self.palette_data)//3), "tree": ProjectManager.get_tree_state(self.tree)})
 
     def restore_state(self, state):
-        self.palette_data = list(state["rgb"])
-        self.palette_alphas = list(state["alpha"])
-        self.palette_snapshot = None
-        
+        self.palette_data = list(state["rgb"]); self.palette_alphas = list(state["alpha"]); self.palette_snapshot = None
         self.tree.delete(*self.tree.get_children(""))
         for g in state.get("tree", []):
-            tags = tuple(g["tags"]) if g["tags"] else ("group",)
-            node = self.tree.insert("", "end", text=g["text"], tags=tags, open=g.get("open", True))
-            if "imported" in tags:
-                self.imported_node = node
-            for child in g["children"]:
-                c_tags = tuple(child["tags"]) if child["tags"] else ("file",)
-                self.tree.insert(node, "end", text=child["text"], tags=c_tags)
-
-        self.draw_palette_grid()
-        self.render_current()
+            node = self.tree.insert("", "end", text=g["text"], tags=tuple(g["tags"]) if g["tags"] else ("group",), open=g.get("open", True))
+            if "imported" in self.tree.item(node, "tags"): self.imported_node = node
+            for child in g["children"]: self.tree.insert(node, "end", text=child["text"], tags=tuple(child["tags"]) if child["tags"] else ("file",))
+        self.draw_palette_grid(); self.render_current()
 
     def load_presets_list(self):
         preset_dir = os.path.join(self.app.current_dir, 'presets')
-        
         if not os.path.exists(preset_dir):
             try: os.makedirs(preset_dir)
             except: pass
-                
         self.preset_files.clear()
         if os.path.exists(preset_dir):
             for f in os.listdir(preset_dir):
-                if f.lower().endswith('.json'):
-                    name = os.path.splitext(f)[0]
-                    self.preset_files[name] = os.path.join(preset_dir, f)
-                    
-        preset_names = list(self.preset_files.keys())
-        preset_names.sort()
-        
-        if "default" in preset_names:
-            preset_names.remove("default")
-            preset_names.insert(0, "default")
-            
+                if f.lower().endswith('.json'): self.preset_files[os.path.splitext(f)[0]] = os.path.join(preset_dir, f)
+        preset_names = sorted(list(self.preset_files.keys()))
+        if "default" in preset_names: preset_names.remove("default"); preset_names.insert(0, "default")
         self.preset_cb['values'] = preset_names
-        if preset_names:
-            self.preset_var.set(preset_names[0])
+        if preset_names: self.preset_var.set(preset_names[0])
 
     def apply_preset(self, event=None):
         selected = self.preset_var.get()
         if selected not in self.preset_files: return
-            
-        filepath = self.preset_files[selected]
         try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
+            with open(self.preset_files[selected], 'r', encoding='utf-8') as f: data = json.load(f)
             for child in self.tree.get_children(""):
                 if child != self.imported_node:
-                    for file_item in self.tree.get_children(child):
-                        self.tree.move(file_item, self.imported_node, "end")
+                    for file_item in self.tree.get_children(child): self.tree.move(file_item, self.imported_node, "end")
                     self.tree.delete(child)
-                
             if isinstance(data, dict) and "groups" in data:
-                for item in data["groups"]:
-                    g_id = item.get("id", 0)
-                    g_name = item.get("name", "Unnamed Group")
-                    formatted_name = f"[{int(g_id):02d}] {g_name}"
-                    self.tree.insert("", "end", text=formatted_name, tags=("group", "preset_group"), open=True)
-            else:
-                logging.warning(f"Le fichier preset '{selected}.json' a un format invalide.")
-                
-            self.tree.move(self.imported_node, "", 0)
-            self.save_state() 
-            self.show_notification(f"Preset '{selected}' chargé.")
-                
+                for item in data["groups"]: self.tree.insert("", "end", text=f"[{int(item.get('id', 0)):02d}] {item.get('name', 'Unnamed Group')}", tags=("group", "preset_group"), open=True)
+            self.tree.move(self.imported_node, "", 0); self.save_state(); self.show_notification(f"Preset '{selected}' chargé.")
         except Exception as e:
             logging.error(f"Failed to load preset {selected}: {e}", exc_info=True)
             messagebox.showerror("Error", f"Could not load preset.\n{e}")
 
-    # --- UI BUILDING ---
-    def build_ui(self):
-        self.parent.columnconfigure(0, weight=0, minsize=260)
-        self.parent.columnconfigure(1, weight=1)
-        self.parent.columnconfigure(2, weight=0, minsize=300)
-        self.parent.rowconfigure(0, weight=1)
+    def on_preview_orig_toggle(self):
+        if self.preview_original_var.get():
+            self.duo_view_var.set(False)
+        self.render_current()
 
-        # LEFT PANEL
-        left = ttk.Frame(self.parent, relief="groove")
-        left.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
-        
-        # 1. Project Import/Export Section
-        proj_f = ttk.Frame(left)
-        proj_f.pack(fill="x", padx=5, pady=5)
+    def on_duo_view_toggle(self):
+        if self.duo_view_var.get():
+            self.preview_original_var.set(False)
+        self.render_current()
+
+    def on_canvas_configure(self, event):
+        self.center_view()
+
+    def build_ui(self):
+        self.parent.columnconfigure(0, weight=0, minsize=260); self.parent.columnconfigure(1, weight=1); self.parent.columnconfigure(2, weight=0, minsize=300); self.parent.rowconfigure(0, weight=1)
+
+        left = ttk.Frame(self.parent, relief="groove"); left.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
+        proj_f = ttk.Frame(left); proj_f.pack(fill="x", padx=5, pady=5)
         ttk.Button(proj_f, text="Import Project", command=self.import_project).pack(side="left", fill="x", expand=True, padx=2)
         ttk.Button(proj_f, text="Export Project", command=self.export_project).pack(side="left", fill="x", expand=True, padx=2)
-        
         ttk.Separator(left, orient="horizontal").pack(fill="x", padx=5, pady=5)
         
-        # 2. Assets Section
-        btn_f = ttk.Frame(left)
-        btn_f.pack(fill="x", padx=5, pady=5)
+        btn_f = ttk.Frame(left); btn_f.pack(fill="x", padx=5, pady=5)
         ttk.Button(btn_f, text="Import", command=self.import_sprites).pack(side="left", fill="x", expand=True, padx=2)
         self.btn_export = ttk.Button(btn_f, text="Export", command=self.export_sprites, state="disabled")
         self.btn_export.pack(side="left", fill="x", expand=True, padx=2)
-        self.btn_clear = ttk.Button(btn_f, text="Clear Assets", command=self.clear_assets)
-        self.btn_clear.pack(side="left", fill="x", expand=True, padx=2)
-        
+        ttk.Button(btn_f, text="Clear Assets", command=self.clear_assets).pack(side="left", fill="x", expand=True, padx=2)
         ttk.Separator(left, orient="horizontal").pack(fill="x", padx=5, pady=5)
         
-        # 3. Presets Section
-        preset_f = ttk.Frame(left)
-        preset_f.pack(fill="x", padx=5, pady=(0, 5))
+        preset_f = ttk.Frame(left); preset_f.pack(fill="x", padx=5, pady=(0, 5))
         ttk.Label(preset_f, text="Presets:").pack(side="left")
-        
         self.preset_var = tk.StringVar()
-        self.preset_cb = ttk.Combobox(preset_f, textvariable=self.preset_var, state="readonly")
-        self.preset_cb.pack(side="left", fill="x", expand=True, padx=5)
-        
+        self.preset_cb = ttk.Combobox(preset_f, textvariable=self.preset_var, state="readonly"); self.preset_cb.pack(side="left", fill="x", expand=True, padx=5)
         ttk.Button(preset_f, text="Load", width=6, command=self.apply_preset).pack(side="left")
-        
         self.load_presets_list()
         
-        # 4. Treeview
-        self.tree = YuyaTreeview(left, selectmode="extended")
-        self.tree.pack(fill="both", expand=True, padx=5, pady=5)
-        self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
-        
-        self.tree.bind("<Control-c>", self.copy_frames)
-        self.tree.bind("<Control-v>", self.paste_frames)
-        self.tree.bind("<Delete>", self.delete_selected)
-        self.tree.bind("<BackSpace>", self.delete_selected)
-        self.tree.bind("<<TreeOrderChanged>>", lambda e: self.save_state())
-        
-        self.tree_menu = tk.Menu(self.tree, tearoff=0)
-        self.tree_menu.add_command(label="Clone / Paste", command=self.clone_selected)
-        self.tree_menu.add_command(label="Delete", command=self.delete_selected)
-        self.tree.bind("<Button-3>", self.on_tree_rclick)
-        
-        self.imported_node = self.tree.insert("", "end", text="Imported", tags=("group", "imported"), open=True)
+        self.tree = AdvancedTreeview(left, allow_groups=True, selectmode="extended"); self.tree.pack(fill="both", expand=True, padx=5, pady=5)
+        self.tree.bind("<<TreeviewSelect>>", self.on_tree_select); self.tree.bind("<Control-c>", self.copy_frames); self.tree.bind("<Control-v>", self.paste_frames)
+        self.tree.bind("<Delete>", self.delete_selected); self.tree.bind("<BackSpace>", self.delete_selected); self.tree.bind("<<TreeOrderChanged>>", self.on_tree_order_changed)
+        self.tree_menu = tk.Menu(self.tree, tearoff=0); self.tree_menu.add_command(label="Clone / Paste", command=self.clone_selected); self.tree_menu.add_command(label="Delete", command=self.delete_selected)
+        self.tree.bind("<Button-3>", self.on_tree_rclick); self.imported_node = self.tree.insert("", "end", text="Imported", tags=("group", "imported"), open=True)
 
-        # CENTER PANEL
+        refresh_f = ttk.Frame(left); refresh_f.pack(fill="x", padx=5, pady=(0,5))
+        ttk.Button(refresh_f, text="🔄 Refresh sources", command=self.refresh_sources).pack(side="left", fill="x", expand=True)
+        
+        json_f = ttk.Frame(left); json_f.pack(fill="x", padx=5, pady=(5, 0))
+        ttk.Button(json_f, text="Generate JSON", command=self.generate_json).pack(side="left", fill="x", expand=True, padx=2)
+        ttk.Button(json_f, text="Preview JSON", command=self.preview_json).pack(side="left", fill="x", expand=True, padx=2)
+        
+        json_name_f = ttk.Frame(left); json_name_f.pack(fill="x", padx=5, pady=5)
+        ttk.Label(json_name_f, text="Name:").pack(side="left")
+        self.proj_name_entry = PlaceholderEntry(json_name_f, "projectName")
+        self.proj_name_entry.pack(side="left", fill="x", expand=True, padx=2)
+
         center = ttk.Frame(self.parent, relief="groove"); center.grid(row=0, column=1, sticky="nsew", padx=2, pady=2)
-        self.canvas = tk.Canvas(center, bg="#303030", highlightthickness=0); self.canvas.pack(fill="both", expand=True)
+        
+        # Nouveau Canvas avec Scrollregion pour Panning & Zooming
+        self.canvas = tk.Canvas(center, bg="#303030", highlightthickness=0, scrollregion=(-5000, -5000, 5000, 5000))
+        self.canvas.pack(fill="both", expand=True)
+        self.canvas.bind("<Configure>", self.on_canvas_configure)
+        self.canvas.bind("<ButtonPress-1>", self.on_canvas_press)
+        
+        # Initialisation globale des bindings depuis le mixin
+        self.setup_canvas_bindings()
+        self.bind_global_zoom(self.parent.winfo_toplevel())
+        
         ctrl = ttk.Frame(center); ctrl.pack(fill="x", padx=5, pady=5)
         self.btn_play = ttk.Button(ctrl, text="▶ Play", command=self.toggle_play); self.btn_play.pack(side="left")
-        
-        ttk.Label(ctrl, text="Framerate (ms):").pack(side="left", padx=(10,0))
-        tk.Entry(ctrl, textvariable=self.framerate_ms_var, width=5).pack(side="left")
+        ttk.Label(ctrl, text="Framerate (ms):").pack(side="left", padx=(10,0)); tk.Entry(ctrl, textvariable=self.framerate_ms_var, width=5).pack(side="left")
         
         zoom_f = ttk.Frame(ctrl); zoom_f.pack(side="left", padx=(20,0))
-        ttk.Checkbutton(zoom_f, text="Auto", variable=self.zoom_auto_var, command=self.render_current).pack(side="left")
+        ttk.Button(zoom_f, text="↺", width=2, command=self.reset_view).pack(side="left", padx=5)
+        
+        def on_zoom_auto_toggle():
+            if self.zoom_auto_var.get():
+                self.center_view()
+            self.render_current()
+            
+        ttk.Checkbutton(zoom_f, text="Auto", variable=self.zoom_auto_var, command=on_zoom_auto_toggle).pack(side="left")
         ttk.Button(zoom_f, text="-", width=2, command=self.zoom_out).pack(side="left")
         self.lbl_zoom = ttk.Label(zoom_f, text="100%"); self.lbl_zoom.pack(side="left", padx=5)
         ttk.Button(zoom_f, text="+", width=2, command=self.zoom_in).pack(side="left")
         
-        ttk.Button(ctrl, text="Remove BG", command=self.remove_bg_prompt).pack(side="left", padx=(20,5))
-        
-        # NOTIFICATION LABEL
-        self.lbl_notification = ttk.Label(ctrl, text="", font=("Arial", 9, "italic"), foreground="#888888")
-        self.lbl_notification.pack(side="left", padx=(10, 0))
+        ttk.Checkbutton(ctrl, text="Preview Original", variable=self.preview_original_var, command=self.on_preview_orig_toggle).pack(side="left", padx=(20,5))
+        ttk.Checkbutton(ctrl, text="Duo view", variable=self.duo_view_var, command=self.on_duo_view_toggle).pack(side="left", padx=(0,5))
+        self.lbl_notification = ttk.Label(ctrl, text="", font=("Arial", 9, "italic"), foreground="#888888"); self.lbl_notification.pack(side="left", padx=(10, 0))
 
-        # RIGHT PANEL
         right = ttk.Frame(self.parent, relief="groove"); right.grid(row=0, column=2, sticky="nsew", padx=2, pady=2)
-        
         h_frame = ttk.Frame(right); h_frame.pack(fill="x", pady=2)
-        ttk.Button(h_frame, text="↶ Undo", command=self.undo).pack(side="left", expand=True, fill="x")
-        ttk.Button(h_frame, text="↷ Redo", command=self.redo).pack(side="left", expand=True, fill="x")
-        
+        ttk.Button(h_frame, text="↶ Undo", command=self.undo).pack(side="left", expand=True, fill="x"); ttk.Button(h_frame, text="↷ Redo", command=self.redo).pack(side="left", expand=True, fill="x")
         io_frame = ttk.Frame(right); io_frame.pack(fill="x", pady=2)
-        ttk.Button(io_frame, text="Import Palette", command=self.import_palette).pack(side="left", expand=True, fill="x")
-        ttk.Button(io_frame, text="Export Palette", command=self.export_palette).pack(side="left", expand=True, fill="x")
+        ttk.Button(io_frame, text="Import Palette", command=self.import_palette).pack(side="left", expand=True, fill="x"); ttk.Button(io_frame, text="Export Palette", command=self.export_palette).pack(side="left", expand=True, fill="x")
 
         ttk.Label(right, text="Palette (256 Colors)").pack(pady=5)
-        self.pal_canvas = tk.Canvas(right, width=256, height=256, bg="black", highlightthickness=1, highlightbackground="gray")
-        self.pal_canvas.pack()
-        self.pal_canvas.bind("<Button-1>", self.on_palette_click)
-        self.pal_canvas.bind("<Button-3>", self.on_palette_rclick)
         
-        tools = ttk.LabelFrame(right, text="Group Selection")
-        tools.pack(fill="x", padx=5, pady=5)
+        self.pal_canvas = tk.Canvas(right, width=256, height=256, bg="#e0e0e0", highlightthickness=1, highlightbackground="gray")
+        self.pal_canvas.pack(); self.pal_canvas.bind("<Button-1>", self.on_palette_click); self.pal_canvas.bind("<Button-3>", self.on_palette_rclick)
         
-        self.group_mode_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(tools, text="Enable Group Mode", variable=self.group_mode_var).pack(anchor="w")
-        
+        tools = ttk.LabelFrame(right, text="Group Selection"); tools.pack(fill="x", padx=5, pady=5)
+        self.group_mode_var = tk.BooleanVar(value=True); ttk.Checkbutton(tools, text="Enable Group Mode", variable=self.group_mode_var).pack(anchor="w")
         f_tol = ttk.Frame(tools); f_tol.pack(fill="x", pady=2)
         ttk.Label(f_tol, text="Tolerance:").pack(side="left")
-        self.tol_var = tk.IntVar(value=10)
-        s_tol = tk.Scale(f_tol, from_=0, to=100, orient="horizontal", variable=self.tol_var, showvalue=0, command=lambda v: self.update_selection_dynamic())
-        s_tol.pack(side="left", fill="x", expand=True)
-        s_tol.bind("<Double-Button-1>", lambda e: self.tol_var.set(10) or self.update_selection_dynamic())
-        tk.Entry(f_tol, textvariable=self.tol_var, width=4).pack(side="left")
-
-        ttk.Button(tools, text="Clear Selection", command=self.clear_selection).pack(fill="x", pady=2)
+        self.tol_var = tk.IntVar(value=10); s_tol = tk.Scale(f_tol, from_=0, to=100, orient="horizontal", variable=self.tol_var, showvalue=0, command=lambda v: self.update_selection_dynamic())
+        s_tol.pack(side="left", fill="x", expand=True); s_tol.bind("<Double-Button-1>", lambda e: self.tol_var.set(10) or self.update_selection_dynamic())
+        tk.Entry(f_tol, textvariable=self.tol_var, width=4).pack(side="left"); ttk.Button(tools, text="Clear Selection", command=self.clear_selection).pack(fill="x", pady=2)
 
         grp = ttk.LabelFrame(right, text="Group Modification (Effect)"); grp.pack(fill="x", padx=5, pady=5)
-        self.grp_h = tk.DoubleVar(value=0.0)
-        self.grp_s = tk.DoubleVar(value=0.0)
-        self.grp_l = tk.DoubleVar(value=0.0)
-        self.create_hsl_slider(grp, "Hue", self.grp_h, -0.5, 0.5)
-        self.create_hsl_slider(grp, "Sat", self.grp_s, -1.0, 1.0)
-        self.create_hsl_slider(grp, "Lum", self.grp_l, -1.0, 1.0)
+        self.grp_h = tk.DoubleVar(value=0.0); self.grp_s = tk.DoubleVar(value=0.0); self.grp_l = tk.DoubleVar(value=0.0)
+        self.create_hsl_slider(grp, "Hue", self.grp_h, -0.5, 0.5); self.create_hsl_slider(grp, "Sat", self.grp_s, -1.0, 1.0); self.create_hsl_slider(grp, "Lum", self.grp_l, -1.0, 1.0)
         bgp = ttk.Frame(grp); bgp.pack(fill="x", pady=5)
-        ttk.Button(bgp, text="Apply", command=self.apply_group_edit).pack(side="left", expand=True, padx=2)
-        ttk.Button(bgp, text="Cancel", command=self.cancel_group_edit).pack(side="left", expand=True, padx=2)
+        ttk.Button(bgp, text="Apply", command=self.apply_group_edit).pack(side="left", expand=True, padx=2); ttk.Button(bgp, text="Cancel", command=self.cancel_group_edit).pack(side="left", expand=True, padx=2)
 
-        # JSON Export / Preview Section (Clean layout without text area)
-        json_f = ttk.Frame(right)
-        json_f.pack(fill="x", padx=5, pady=5)
-        ttk.Button(json_f, text="Generate JSON", command=self.generate_json).pack(side="left", padx=2)
-        ttk.Button(json_f, text="Preview JSON", command=self.preview_json).pack(side="left", padx=2)
-        ttk.Label(json_f, text="Name:").pack(side="left", padx=(10, 2))
-        self.proj_name_entry = PlaceholderEntry(json_f, "projectName")
-        self.proj_name_entry.pack(side="left", fill="x", expand=True, padx=2)
+        self.btn_pick_palette = ttk.Button(right, text="🖌️ Pick Sprite Color", command=self.activate_palette_picker)
+        self.btn_pick_palette.pack(fill="x", padx=5, pady=(10, 5))
 
-        if self.preset_var.get() == "default":
-            self.apply_preset()
-        else:
-            self.save_state()
+        transp_frame = ttk.LabelFrame(right, text="Background Removal"); transp_frame.pack(fill="x", padx=5, pady=5)
+        transp_inner = ttk.Frame(transp_frame); transp_inner.pack(fill="x", pady=2)
+        transp_inner.columnconfigure(1, weight=1)
+        ttk.Checkbutton(transp_inner, text="Remove Color:", variable=self.remove_bg_var, command=self.render_current).grid(row=0, column=0, sticky="w", padx=5, pady=3)
+        ttk.Entry(transp_inner, textvariable=self.transp_color, width=9).grid(row=0, column=1, sticky="ew", padx=(0,5), pady=3)
+        self.transp_color.trace_add("write", lambda *args: self.render_current())
+        ttk.Button(transp_inner, text="🖌️ Eyedropper", command=self.activate_eyedropper).grid(row=1, column=0, columnspan=2, sticky="ew", padx=5, pady=3)
 
-    # --- ACTION METHODS ---
-    def _build_json_data(self):
-        """Construit le dictionnaire de données JSON et le retourne sous forme de chaîne formatée et compactée."""
-        proj_name = self.proj_name_entry.get_value()
-        if not proj_name or proj_name == "projectName":
-            proj_name = "MyProject"
+        if self.preset_var.get() == "default": self.apply_preset()
+        else: self.save_state()
 
-        json_structure = {"basepath": f"sprites/{proj_name}/", "images": []}
+    def _sort_palette_and_remap(self, palette_data, palette_alphas, anim_data):
+        if not palette_data: return [], []
         
-        for group_id in self.tree.get_children(""):
-            if group_id == self.imported_node:
-                continue 
+        limit = len(palette_data) // 3
+        colors = [(i, tuple(palette_data[i*3:i*3+3])) for i in range(limit)]
+
+        def sort_key(item):
+            r, g, b = item[1]
+            h, s, v = colorsys.rgb_to_hsv(r/255.0, g/255.0, b/255.0)
+            luma = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+            
+            if s < 0.18 or v < 0.15 or luma > 0.95:
+                return (0, 0, luma, s)
                 
-            txt = self.tree.item(group_id, 'text')
-            gid = 0
-            if txt.startswith("[") and "]" in txt:
-                try:
-                    gid = int(txt[1:txt.find("]")])
-                except ValueError:
-                    pass
+            h_deg = h * 360
+            if h_deg < 20 or h_deg >= 340: fam = 1 
+            elif h_deg < 45: fam = 2 
+            elif h_deg < 75: fam = 3 
+            elif h_deg < 160: fam = 4 
+            elif h_deg < 200: fam = 5 
+            elif h_deg < 260: fam = 6 
+            elif h_deg < 310: fam = 7 
+            else: fam = 8 
+            
+            s_bucket = 0 if s < 0.45 else 1
+            return (1, fam, s_bucket, luma)
+
+        sorted_colors = sorted(colors, key=sort_key)
+        mapping = {old_idx: new_idx for new_idx, (old_idx, rgb) in enumerate(sorted_colors)}
+
+        new_pal = []
+        for _, rgb in sorted_colors:
+            new_pal.extend(rgb)
+
+        palette_alphas = palette_alphas or [255] * limit
+        new_alphas = [palette_alphas[old_idx] for old_idx, _ in sorted_colors]
+
+        for data in anim_data.values():
+            if "idx" in data:
+                img_p = data["idx"]
+                new_pixels = [mapping.get(p, p) for p in img_p.getdata()]
+                img_p.putdata(new_pixels)
+
+        return new_pal, new_alphas
+
+    def on_tree_order_changed(self, event):
+        self.unsaved_reorders += 1
+        self.save_state()
+
+    def activate_eyedropper(self):
+        self.eyedropper_mode = True
+        self.palette_picker_mode = False
+        self.canvas.config(cursor="crosshair")
+
+    def activate_palette_picker(self):
+        self.palette_picker_mode = True
+        self.eyedropper_mode = False
+        self.canvas.config(cursor="crosshair")
+
+    def on_canvas_press(self, event):
+        if (self.eyedropper_mode or self.palette_picker_mode) and self.current_frame_list:
+            fname = self.current_frame_list[self.current_frame_index]
+            if fname in self.anim_data:
+                img_data = self.anim_data[fname]
+                w, h = img_data["idx"].size
+                
+                is_duo = self.duo_view_var.get()
+                gap = 10
+                disp_w = (w * 2 + gap) if is_duo else w
+                
+                z = min(self.canvas.winfo_width()/disp_w, self.canvas.winfo_height()/h) * 0.9 if self.zoom_auto_var.get() and self.canvas.winfo_width() > 10 and disp_w > 0 and h > 0 else self.zoom_level
+                
+                # Conversion des coordonnées avec le canvas de défilement centralisé
+                sw, sh = int(disp_w * z), int(h * z)
+                cx, cy = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+                tl_x, tl_y = 0 - sw / 2, 0 - sh / 2
+                
+                img_x, img_y = int((cx - tl_x) / z), int((cy - tl_y) / z)
+                
+                if is_duo:
+                    if img_x >= w + gap:
+                        img_x -= (w + gap)
+                    elif w <= img_x < w + gap:
+                        img_x = -1 
+                        
+                if 0 <= img_x < w and 0 <= img_y < h:
+                    px_idx = img_data["idx"].getpixel((img_x, img_y))
                     
-            children = self.tree.get_children(group_id)
-            for frame_idx, item_id in enumerate(children):
-                fname = self.tree.item(item_id, 'text')
-                base_name, _ = os.path.splitext(fname)
-                json_structure["images"].append({"group": gid, "frame": frame_idx, "file": f"{base_name}.png"})
-                
-        raw_json = json.dumps(json_structure, indent=4)
-        
-        # Regex très propre pour compacter l'objet JSON intérieur sur une seule ligne
-        compact_json = re.sub(
-            r'\{\s+"group":\s+(\d+),\s+"frame":\s+(\d+),\s+"file":\s+"([^"]+)"\s+\}', 
-            r'{ "group": \1, "frame": \2, "file": "\3" }', 
-            raw_json
-        )
-        
-        return compact_json
+                    if self.eyedropper_mode:
+                        if px_idx * 3 + 2 < len(self.palette_data):
+                            r, g, b = self.palette_data[px_idx*3 : px_idx*3+3]
+                            self.transp_color.set(f"#{r:02x}{g:02x}{b:02x}".upper())
+                            self.remove_bg_var.set(True)
+                            
+                    elif self.palette_picker_mode:
+                        if px_idx < len(self.palette_data) // 3:
+                            self.reference_color_index = px_idx
+                            self.last_selected_index = px_idx
+                            self.selected_indices = {px_idx}
+                            if self.palette_snapshot is None: self.palette_snapshot = list(self.palette_data)
+                            if self.group_mode_var.get():
+                                self.update_selection_dynamic()
+                            else:
+                                self.draw_palette_grid()
+                                
+            self.eyedropper_mode = False
+            self.palette_picker_mode = False
+            self.canvas.config(cursor="")
+            self.render_current()
 
-    def generate_json(self):
-        """Ne fait que signaler que la structure a été générée en mémoire (logique d'enregistrement à venir)."""
-        self._build_json_data()
+    def generate_json(self): 
         self.show_notification("Structure JSON générée en mémoire (prête à exporter).")
 
     def preview_json(self):
-        """Ouvre une fenêtre pop-up affichant le JSON formaté."""
-        json_str = self._build_json_data()
-        
-        top = tk.Toplevel(self.parent)
-        top.title("JSON Preview")
-        top.geometry("550x650")
-        
-        main_x = self.parent.winfo_rootx()
-        main_y = self.parent.winfo_rooty()
-        top.geometry(f"+{main_x + 100}+{main_y + 100}")
-        
+        json_str = ProjectManager.build_compact_json(self.tree, self.imported_node, self.proj_name_entry.get_value())
+        top = tk.Toplevel(self.parent); top.title("JSON Preview"); top.geometry(f"550x650+{self.parent.winfo_rootx() + 100}+{self.parent.winfo_rooty() + 100}")
         txt = tk.Text(top, font=("Consolas", 10), bg="#1e1e1e", fg="#d4d4d4", wrap="none")
-        vsb = ttk.Scrollbar(top, orient="vertical", command=txt.yview)
-        hsb = ttk.Scrollbar(top, orient="horizontal", command=txt.xview)
-        txt.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        
-        vsb.pack(side="right", fill="y")
-        hsb.pack(side="bottom", fill="x")
-        txt.pack(side="left", fill="both", expand=True)
-        
-        txt.insert("1.0", json_str)
-        txt.config(state="disabled")
+        vsb = ttk.Scrollbar(top, orient="vertical", command=txt.yview); hsb = ttk.Scrollbar(top, orient="horizontal", command=txt.xview)
+        txt.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set); vsb.pack(side="right", fill="y"); hsb.pack(side="bottom", fill="x"); txt.pack(side="left", fill="both", expand=True)
+        txt.insert("1.0", json_str); txt.config(state="disabled")
 
     def copy_frames(self, event=None):
-        self.clipboard_frames = []
-        for item in self.tree.selection():
-            if "file" in self.tree.item(item, "tags"):
-                self.clipboard_frames.append(self.tree.item(item, "text"))
+        self.clipboard_frames = [self.tree.item(item, "text") for item in self.tree.selection() if "file" in self.tree.item(item, "tags")]
 
     def paste_frames(self, event=None):
         if not self.clipboard_frames: return
-        
         sel = self.tree.selection()
-        target_node = self.imported_node
-        idx = "end"
-        
+        target_node, idx = self.imported_node, "end"
         if sel:
-            tags = self.tree.item(sel[0], "tags")
-            if "group" in tags:
-                target_node = sel[0]
-            elif "file" in tags:
-                target_node = self.tree.parent(sel[0])
-                idx = self.tree.index(sel[0]) + 1
-        
+            if "group" in self.tree.item(sel[0], "tags"): target_node = sel[0]
+            elif "file" in self.tree.item(sel[0], "tags"): target_node = self.tree.parent(sel[0]); idx = self.tree.index(sel[0]) + 1
         for fname in self.clipboard_frames:
             if fname in self.anim_data:
-                if idx == "end":
-                    self.tree.insert(target_node, "end", text=fname, tags=("file",))
-                else:
-                    self.tree.insert(target_node, idx, text=fname, tags=("file",))
-                    if isinstance(idx, int): idx += 1
-                    
+                self.tree.insert(target_node, idx if idx != "end" else "end", text=fname, tags=("file",))
+                if isinstance(idx, int): idx += 1
         self.save_state()
 
     def delete_selected(self, event=None):
         sel = self.tree.selection()
         if not sel: return
-        changed = False
+        
+        def get_all_files(parent=""):
+            res = []
+            for child in self.tree.get_children(parent):
+                if "file" in self.tree.item(child, "tags"):
+                    res.append(child)
+                if self.tree.item(child, "open"):
+                    res.extend(get_all_files(child))
+            return res
+        
+        flat_files = get_all_files()
+        first_sel_idx = -1
         for item in sel:
+            if item in flat_files:
+                idx = flat_files.index(item)
+                if first_sel_idx == -1 or idx < first_sel_idx:
+                    first_sel_idx = idx
+
+        deleted = False
+        for item in list(sel):
             if "file" in self.tree.item(item, "tags"):
                 self.tree.delete(item)
-                changed = True
-        if changed:
+                deleted = True
+                
+        if deleted:
             self.save_state()
+            remaining_files = get_all_files()
+            if remaining_files:
+                new_idx = first_sel_idx - 1
+                if new_idx < 0:
+                    new_idx = 0
+                if new_idx >= len(remaining_files):
+                    new_idx = len(remaining_files) - 1
+                    
+                next_item = remaining_files[new_idx]
+                self.tree.selection_set(next_item)
+                self.tree.focus(next_item)
+                self.tree._last_clicked_item = next_item
+                self.on_tree_select(None)
+            else:
+                self.current_frame_list = []
+                self.canvas.delete("all")
 
     def on_tree_rclick(self, event):
         item = self.tree.identify_row(event.y)
@@ -704,464 +484,432 @@ class SpriteEditorTab:
                 self.tree.selection_set(item)
             self.tree_menu.post(event.x_root, event.y_root)
 
-    def clone_selected(self):
-        self.copy_frames()
-        self.paste_frames()
+    def clone_selected(self): self.copy_frames(); self.paste_frames()
 
-    def remove_bg_prompt(self):
-        if not self.anim_data or not self.current_frame_list:
-            messagebox.showinfo("Info", "Veuillez d'abord sélectionner une image dans l'arbre.")
+    def refresh_sources(self):
+        count = 0
+        if not self.palette_data:
+            messagebox.showinfo("Info", "Aucune palette active.")
             return
             
-        fname = self.current_frame_list[self.current_frame_index]
-        img_idx = self.anim_data[fname]["idx"]
+        full_pal = list(self.palette_data)
+        pad_col = self.palette_data[:3] if self.palette_data else [0,0,0]
+        while len(full_pal) < 768: full_pal.extend(pad_col)
+        pal_img = Image.new("P", (1,1))
+        pal_img.putpalette(full_pal)
         
-        px_idx = img_idx.getpixel((0, 0))
-        
-        if px_idx * 3 + 2 < len(self.palette_data):
-            r = self.palette_data[px_idx*3]
-            g = self.palette_data[px_idx*3+1]
-            b = self.palette_data[px_idx*3+2]
-            default_color = f"#{r:02x}{g:02x}{b:02x}"
-        else:
-            default_color = "#000000"
-            
-        color = colorchooser.askcolor(initialcolor=default_color, title="Couleur à rendre transparente")
-        
-        if color[1]:
-            target = color[0]
-            best_idx = 0
-            min_dist = 999999
-            for i in range(256):
-                if i*3+2 >= len(self.palette_data): break
-                cr, cg, cb = self.palette_data[i*3:i*3+3]
-                dist = (cr - target[0])**2 + (cg - target[1])**2 + (cb - target[2])**2
-                if dist < min_dist:
-                    min_dist = dist
-                    best_idx = i
-            
-            if not self.palette_alphas:
-                self.palette_alphas = [255]*256
-            
-            self.palette_alphas[best_idx] = 0
-            self.draw_palette_grid()
+        for fname, data in self.anim_data.items():
+            fpath = data.get("path")
+            if fpath and os.path.exists(fpath):
+                try:
+                    img = Image.open(fpath).convert("RGBA")
+                    alpha = img.split()[3]; rgb = img.convert("RGB")
+                    data["idx"] = rgb.quantize(palette=pal_img, dither=Image.Dither.NONE)
+                    data["alpha"] = alpha
+                    count += 1
+                except Exception as e:
+                    logging.error(f"Failed to refresh {fname}: {e}", exc_info=True)
+        if count > 0:
             self.render_current()
             self.save_state()
-            self.show_notification(f"Couleur #{best_idx} supprimée du fond.")
+            self.show_notification(f"{count} image(s) rafraîchie(s) depuis la source.")
+        else:
+            self.show_notification("Aucune image source n'a pu être actualisée.")
 
-    # -------------------------------------------------------------------------
-    # HSL SLIDERS & PALETTE
-    # -------------------------------------------------------------------------
     def create_hsl_slider(self, parent, label, var, mini, maxi):
         r = ttk.Frame(parent); r.pack(fill="x", pady=2)
         ttk.Label(r, text=label, width=4).pack(side="left")
         s = tk.Scale(r, from_=mini, to=maxi, resolution=0.01, orient="horizontal", variable=var, showvalue=0)
         s.pack(side="left", fill="x", expand=True)
-        s.bind("<Button-1>", self.start_group_edit)
-        s.bind("<B1-Motion>", self.update_group_edit)
-        s.bind("<ButtonRelease-1>", self.end_group_edit)
-        s.bind("<Double-Button-1>", lambda e: self.reset_slider(var))
+        s.bind("<Button-1>", self.start_group_edit); s.bind("<B1-Motion>", self.update_group_edit); s.bind("<ButtonRelease-1>", self.end_group_edit); s.bind("<Double-Button-1>", lambda e: self.reset_slider(var))
         tk.Entry(r, textvariable=var, width=5).pack(side="left")
 
-    def reset_slider(self, var):
-        var.set(0.0)
-        self.update_group_edit(None) 
+    def reset_slider(self, var): var.set(0.0); self.update_group_edit(None) 
 
-    def sort_palette_and_remap(self):
-        if not self.palette_data: return
-        colors = []
-        for i in range(256):
-            if i*3+2 >= len(self.palette_data): break
-            rgb = tuple(self.palette_data[i*3 : i*3+3])
-            colors.append((i, rgb))
-        
-        def sort_key(item):
-            r, g, b = item[1]
-            h, l, s = colorsys.rgb_to_hls(r/255.0, g/255.0, b/255.0)
-            return (h, l, s)
-            
-        sorted_colors = sorted(colors, key=sort_key)
-        mapping = {}
-        new_pal = []
-        new_alphas = [] 
-        if not self.palette_alphas: self.palette_alphas = [255]*256
-        
-        for new_idx, (old_idx, rgb) in enumerate(sorted_colors):
-            new_pal.extend(rgb)
-            mapping[old_idx] = new_idx
-            new_alphas.append(self.palette_alphas[old_idx])
-            
-        self.palette_data = new_pal
-        self.palette_alphas = new_alphas
-        
-        for fname, data in self.anim_data.items():
-            img_p = data["idx"]
-            pixels = list(img_p.getdata())
-            new_pixels = [mapping.get(p, p) for p in pixels]
-            img_p.putdata(new_pixels)
-            
     def import_sprites(self):
         files = filedialog.askopenfilenames(filetypes=[("Images", "*.png;*.bmp")])
         if not files: return
-        
         self.last_open_dir = os.path.dirname(files[0])
 
         if not self.palette_data:
             try:
-                combo = Image.new("RGB", (1000, 1000))
+                max_w = max((Image.open(f).width for f in files[:15]), default=100)
+                total_h = sum((Image.open(f).height for f in files[:15]))
+                if total_h == 0: total_h = 100
+                
+                combo = Image.new("RGB", (max_w, total_h))
                 y_off = 0
                 for f in files[:15]: 
                     i = Image.open(f).convert("RGB")
                     combo.paste(i, (0, y_off))
                     y_off += i.height
+                    
                 q = combo.quantize(colors=256, method=Image.Quantize.MEDIANCUT)
-                self.palette_data = q.getpalette()[:768]
-                self.palette_alphas = [255]*256
-                self.sort_palette_and_remap()
-            except Exception as e: 
-                logging.error(f"Quantize error: {e}", exc_info=True)
+                raw_pal = q.getpalette()
+                
+                used_indices = set(q.getdata())
+                active_palette = []
+                for old_idx in sorted(used_indices):
+                    active_palette.extend(raw_pal[old_idx*3 : old_idx*3+3])
+                    
+                self.palette_data = active_palette
+                self.palette_alphas = [255] * len(used_indices)
+                
+                self.palette_data, self.palette_alphas = self._sort_palette_and_remap(self.palette_data, self.palette_alphas, self.anim_data)
+                
+                self.original_palette_data = list(self.palette_data)
+                self.original_palette_alphas = list(self.palette_alphas)
+            except Exception as e: logging.error(f"Quantize error: {e}", exc_info=True)
                 
         self.palette_snapshot = None 
         sel = self.tree.selection()
+        parent = sel[0] if sel and "group" in self.tree.item(sel[0], "tags") else self.imported_node
         
-        if sel and "group" in self.tree.item(sel[0], "tags"): 
-            parent = sel[0]
-        else: 
-            parent = self.imported_node
+        full_pal = list(self.palette_data)
+        pad_color = self.palette_data[:3] if self.palette_data else [0,0,0]
+        while len(full_pal) < 768: full_pal.extend(pad_color)
+        pal_img = Image.new("P", (1,1))
+        pal_img.putpalette(full_pal)
             
-        pal_img = Image.new("P", (1,1)); pal_img.putpalette(self.palette_data)
         for f in files:
             fname = os.path.basename(f)
             try:
-                img = Image.open(f).convert("RGBA")
-                alpha = img.split()[3]
-                rgb = img.convert("RGB")
-                idx = rgb.quantize(palette=pal_img, dither=Image.Dither.NONE)
-                self.anim_data[fname] = {"idx": idx, "alpha": alpha}
+                img = Image.open(f).convert("RGBA"); alpha = img.split()[3]; rgb = img.convert("RGB")
+                self.anim_data[fname] = {"idx": rgb.quantize(palette=pal_img, dither=Image.Dither.NONE), "alpha": alpha, "path": f}
                 self.tree.insert(parent, "end", text=fname, tags=("file",))
-            except Exception as e: 
-                logging.error(f"Import error {fname}: {e}", exc_info=True)
+            except Exception as e: logging.error(f"Import error {fname}: {e}", exc_info=True)
                 
-        self.draw_palette_grid()
-        self.btn_export.config(state="normal")
-        self.save_state()
-        self.show_notification(f"{len(files)} image(s) importée(s).")
+        self.draw_palette_grid(); self.btn_export.config(state="normal"); self.save_state(); self.show_notification(f"{len(files)} image(s) importée(s).")
 
     def export_sprites(self):
         if not self.anim_data: return
         dest = filedialog.askdirectory(initialdir=self.last_open_dir)
         if not dest: return
+
+        popup = tk.Toplevel(self.parent); popup.title("Exporting Sprites...")
+        popup.geometry(f"350x120+{self.parent.winfo_rootx() + (self.parent.winfo_width() - 350) // 2}+{self.parent.winfo_rooty() + (self.parent.winfo_height() - 120) // 2}")
+        popup.transient(self.parent.winfo_toplevel()); popup.grab_set() 
+
+        lbl_status = ttk.Label(popup, text="Starting export..."); lbl_status.pack(pady=(15, 5))
+        progress = ttk.Progressbar(popup, orient="horizontal", length=300, mode="determinate"); progress.pack(pady=5)
         
-        count = 0
-        try:
-            for fname, d in self.anim_data.items():
-                base_name, _ = os.path.splitext(fname)
-                export_fname = f"{base_name}.png"
-                
-                d["idx"].putpalette(self.palette_data)
-                img = d["idx"].convert("RGBA")
-                base_alpha = d["alpha"]
-                
-                gray_pal = []
-                for a_val in self.palette_alphas: gray_pal.extend((a_val, a_val, a_val))
-                gray_pal.extend([255]*(768-len(gray_pal)))
-                alpha_mask = d["idx"].copy()
-                alpha_mask.putpalette(gray_pal)
-                alpha_mask = alpha_mask.convert("L")
-                
-                final_alpha = ImageChops.multiply(base_alpha, alpha_mask)
-                img.putalpha(final_alpha)
-                
-                dest_path = os.path.join(dest, export_fname)
-                c = 1
-                while os.path.exists(dest_path):
-                    export_fname = f"{base_name}_{c}.png"
-                    dest_path = os.path.join(dest, export_fname)
-                    c += 1
-                
-                # Sauvegarde strictement au format PNG pour forcer le canal Alpha !
-                img.save(dest_path, format="PNG")
-                count += 1
-                
-            self.show_notification(f"{count} image(s) exportée(s) avec succès.")
+        def process_item(item):
+            fname, d = item
+            base_name, _ = os.path.splitext(fname)
+            export_fname = f"{base_name}.png"
             
-        except Exception as e:
-            logging.error(f"Export failed: {e}", exc_info=True)
-            messagebox.showerror("Export Failed", str(e))
+            render_pal = list(self.palette_data)
+            pad_color = self.palette_data[:3] if self.palette_data else [0,0,0]
+            while len(render_pal) < 768: render_pal.extend(pad_color)
+            d["idx"].putpalette(render_pal)
+            
+            img = d["idx"].convert("RGBA")
+            base_alpha = d["alpha"]
+            
+            base_alphas_export = list(self.palette_alphas) if self.palette_alphas else [255]*(len(self.palette_data)//3)
+            if self.remove_bg_var.get() and self.transp_color.get():
+                try:
+                    target = hex_to_rgb(self.transp_color.get())
+                    best_idx, min_dist = 0, 999999
+                    for i in range(min(256, len(self.palette_data)//3)):
+                        dist = sum((self.palette_data[i*3+j] - target[j])**2 for j in range(3))
+                        if dist < min_dist: min_dist, best_idx = dist, i
+                    base_alphas_export[best_idx] = 0
+                except: pass
+            
+            gray_pal = []
+            for a_val in base_alphas_export: gray_pal.extend((a_val, a_val, a_val))
+            gray_pal.extend([255]*(768-len(gray_pal)))
+            
+            alpha_mask = d["idx"].copy()
+            alpha_mask.putpalette(gray_pal)
+            
+            final_alpha = ImageChops.multiply(base_alpha, alpha_mask.convert("L"))
+            img.putalpha(final_alpha)
+            
+            dest_path = os.path.join(dest, export_fname)
+            c = 1
+            while os.path.exists(dest_path):
+                export_fname = f"{base_name}_{c}.png"; dest_path = os.path.join(dest, export_fname); c += 1
+            img.save(dest_path, format="PNG")
+            return export_fname
+
+        def worker():
+            count, total = 0, len(self.anim_data)
+            try:
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    futures = {executor.submit(process_item, item): item for item in self.anim_data.items()}
+                    for future in concurrent.futures.as_completed(futures):
+                        name = future.result(); count += 1
+                        self.parent.after(0, lambda current=count, tot=total, n=name: (
+                            progress.config(value=(current/tot)*100),
+                            lbl_status.config(text=f"Exported {current}/{tot}: {n}")
+                        ))
+                self.unsaved_color_edits = 0; self.unsaved_reorders = 0
+                self.parent.after(0, lambda: (popup.destroy(), self.show_notification(f"{count} image(s) exportée(s) avec succès.")))
+            except Exception as e:
+                logging.error(f"Export failed: {e}", exc_info=True)
+                self.parent.after(0, lambda: (popup.destroy(), messagebox.showerror("Export Failed", str(e))))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def clear_assets(self):
         if not messagebox.askyesno("Confirm", "Clear all imported sprites and palette?"): return
-        
-        self.anim_data.clear()
-        self.palette_data = []
-        self.palette_alphas = []
-        self.palette_snapshot = None
-        self.current_frame_list = []
-        self.clipboard_frames = []
-        self.history = []
-        self.history_index = -1
-        
-        self.canvas.delete("all")
-        self.pal_canvas.delete("all")
-        
+        self.anim_data.clear(); self.palette_data = []; self.palette_alphas = []; self.palette_snapshot = None; self.current_frame_list = []; self.clipboard_frames = []
+        self.original_palette_data = []; self.original_palette_alphas = []
+        self.history_mgr.clear(); self.canvas.delete("all"); self.pal_canvas.delete("all")
         for group in self.tree.get_children(""):
-            for file_node in self.tree.get_children(group):
-                self.tree.delete(file_node)
+            for file_node in self.tree.get_children(group): self.tree.delete(file_node)
+        self.app.async_clear_cache(); self.btn_export.config(state="disabled"); self.save_state()
         
-        try:
-            for f in os.listdir(self.app.cache_dir):
-                fp = os.path.join(self.app.cache_dir, f)
-                if os.path.isfile(fp): os.unlink(fp)
-        except: pass
-        
-        self.btn_export.config(state="disabled")
-        self.save_state()
+        self.current_frame_index = 0
+        self.is_playing = False
+        self.btn_play.config(text="▶ Play")
+        if self.anim_job:
+            self.app.root.after_cancel(self.anim_job)
+            self.anim_job = None
+            
         self.show_notification("Projet nettoyé.")
 
     def draw_palette_grid(self):
         self.pal_canvas.delete("all")
-        for i in range(256):
-            if i*3+2 >= len(self.palette_data): break
-            r,g,b = self.palette_data[i*3 : i*3+3]
-            color = f"#{r:02x}{g:02x}{b:02x}"
-            x, y = (i%16)*16, (i//16)*16
-            tag = f"c_{i}"
-            rect = self.pal_canvas.create_rectangle(x, y, x+16, y+16, fill=color, outline="gray", tags=tag)
+        for i in range(len(self.palette_data)//3):
+            r,g,b = self.palette_data[i*3 : i*3+3]; x, y = (i%16)*16, (i//16)*16
+            rect = self.pal_canvas.create_rectangle(x, y, x+16, y+16, fill=f"#{r:02x}{g:02x}{b:02x}", outline="gray", tags=f"c_{i}")
             if i in self.selected_indices:
-                self.pal_canvas.itemconfig(rect, outline="white", width=2)
-                self.pal_canvas.create_rectangle(x+2, y+2, x+14, y+14, outline="black", tags="sel_inner")
-
-    def zoom_in(self):
-        self.zoom_auto_var.set(False)
-        self.zoom_level += 0.5
-        self.render_current()
-
-    def zoom_out(self):
-        self.zoom_auto_var.set(False)
-        self.zoom_level = max(0.5, self.zoom_level - 0.5)
-        self.render_current()
-
-    def toggle_play(self):
+                self.pal_canvas.itemconfig(rect, outline="white", width=2); self.pal_canvas.create_rectangle(x+2, y+2, x+14, y+14, outline="black", tags="sel_inner")
+    
+    def toggle_play(self): 
         self.is_playing = not self.is_playing
         self.btn_play.config(text="⏸ Stop" if self.is_playing else "▶ Play")
-        if self.is_playing: self.run_anim_loop()
+        if self.is_playing:
+            self.run_anim_loop()
+        elif self.anim_job:
+            self.app.root.after_cancel(self.anim_job)
+            self.anim_job = None
 
     def run_anim_loop(self):
+        if self.anim_job:
+            self.app.root.after_cancel(self.anim_job)
+            self.anim_job = None
         if self.is_playing and self.current_frame_list:
             self.current_frame_index = (self.current_frame_index + 1) % len(self.current_frame_list)
             self.render_current()
-            try:
-                ms = int(self.framerate_ms_var.get())
+            try: ms = int(self.framerate_ms_var.get())
             except: ms = 100
-            self.app.root.after(max(10, ms), self.run_anim_loop)
+            self.anim_job = self.app.root.after(max(10, ms), self.run_anim_loop)
+
+    def _build_render_image(self, d, pal, base_alphas):
+        render_pal = list(pal)
+        pad_col = pal[:3] if pal else [0,0,0]
+        while len(render_pal) < 768: render_pal.extend(pad_col)
+        
+        idx_copy = d["idx"].copy()
+        idx_copy.putpalette(render_pal)
+        img = idx_copy.convert("RGBA")
+        base_alpha = d["alpha"]
+        
+        base_alphas_render = list(base_alphas) if base_alphas else [255]*(len(pal)//3)
+
+        if self.remove_bg_var.get() and self.transp_color.get():
+            try:
+                target = hex_to_rgb(self.transp_color.get())
+                best_idx, min_dist = 0, 999999
+                for i in range(min(256, len(pal)//3)):
+                    dist = sum((pal[i*3+j] - target[j])**2 for j in range(3))
+                    if dist < min_dist: min_dist, best_idx = dist, i
+                base_alphas_render[best_idx] = 0
+            except: pass
+
+        gray_pal = []
+        for a_val in base_alphas_render: gray_pal.extend((a_val, a_val, a_val))
+        gray_pal.extend([255]*(768-len(gray_pal)))
+        
+        alpha_mask = d["idx"].copy()
+        alpha_mask.putpalette(gray_pal)
+        
+        img.putalpha(ImageChops.multiply(base_alpha, alpha_mask.convert("L")))
+        return img
 
     def render_current(self):
-        if not self.current_frame_list: return
+        if not self.current_frame_list:
+            self.canvas.delete("all")
+            return
+            
         fname = self.current_frame_list[self.current_frame_index]
         if fname not in self.anim_data: return
         d = self.anim_data[fname]
         
-        d["idx"].putpalette(self.palette_data)
-        img = d["idx"].convert("RGBA")
-        base_alpha = d["alpha"]
-        w, h = img.size
+        is_duo = self.duo_view_var.get()
+        is_orig = self.preview_original_var.get()
         
-        gray_pal = []
-        for a_val in self.palette_alphas: gray_pal.extend((a_val, a_val, a_val))
-        gray_pal.extend([255]*(768-len(gray_pal)))
-        alpha_mask = d["idx"].copy(); alpha_mask.putpalette(gray_pal); alpha_mask = alpha_mask.convert("L")
+        pal_mod = self.palette_data
+        alphas_mod = self.palette_alphas
         
-        final_alpha = ImageChops.multiply(base_alpha, alpha_mask)
-        img.putalpha(final_alpha)
+        pal_orig_data = self.original_palette_data if self.original_palette_data else self.palette_data
+        alphas_orig_data = self.original_palette_alphas if self.original_palette_alphas else self.palette_alphas
         
-        z = 1.0
-        if self.zoom_auto_var.get():
-            cw = self.canvas.winfo_width(); ch = self.canvas.winfo_height()
-            if cw > 10 and ch > 10 and w > 0 and h > 0:
-                z = min(cw/w, ch/h) * 0.9 
+        if is_duo:
+            img1 = self._build_render_image(d, pal_orig_data, alphas_orig_data)
+            img2 = self._build_render_image(d, pal_mod, alphas_mod)
+            w, h = img1.size
+            gap = 10
+            disp_w = w * 2 + gap
+            final_img = Image.new("RGBA", (disp_w, h), (0,0,0,0))
+            final_img.paste(img1, (0, 0))
+            final_img.paste(img2, (w + gap, 0))
+            img_to_scale = final_img
+            target_w = disp_w
         else:
-            z = self.zoom_level
+            if is_orig:
+                img_to_scale = self._build_render_image(d, pal_orig_data, alphas_orig_data)
+            else:
+                img_to_scale = self._build_render_image(d, pal_mod, alphas_mod)
+            target_w, h = img_to_scale.size
         
+        z = min(self.canvas.winfo_width()/target_w, self.canvas.winfo_height()/h) * 0.9 if self.zoom_auto_var.get() and self.canvas.winfo_width() > 10 and target_w > 0 and h > 0 else self.zoom_level
         self.lbl_zoom.config(text=f"{int(z*100)}%")
+        w_new, h_new = int(target_w * z), int(h * z)
         
-        w_new, h_new = int(w * z), int(h * z)
         if w_new > 0 and h_new > 0:
-            img = img.resize((w_new, h_new), Image.Resampling.NEAREST)
+            img_to_scale = img_to_scale.resize((w_new, h_new), Image.Resampling.NEAREST)
         
-        self.tk_img = ImageTk.PhotoImage(img)
+        self.tk_img = ImageTk.PhotoImage(img_to_scale)
         self.canvas.delete("all")
-        cx, cy = self.canvas.winfo_width()//2, self.canvas.winfo_height()//2
-        self.canvas.create_image(cx, cy, image=self.tk_img)
+        self.canvas.create_image(0, 0, image=self.tk_img, anchor="center")
 
     def on_tree_select(self, event):
-        sel = self.tree.selection()
-        if not sel: return
-        item = sel[0]; tags = self.tree.item(item, "tags")
+        if not (sel := self.tree.selection()): return
+        item = self.tree._last_clicked_item if getattr(self.tree, '_last_clicked_item', None) in sel else (self.tree.focus() if self.tree.focus() in sel else sel[-1])
+        tags = self.tree.item(item, "tags")
         if "file" in tags:
             f = self.tree.item(item, "text"); self.current_frame_list = [f]; self.current_frame_index = 0
-            self.render_current(); self.is_playing = False; self.btn_play.config(text="▶ Play")
+            self.is_playing = False; self.btn_play.config(text="▶ Play")
+            if self.anim_job:
+                self.app.root.after_cancel(self.anim_job)
+                self.anim_job = None
+            self.render_current()
             self.last_open_dir = os.path.dirname(os.path.join(self.last_open_dir, f)) 
         elif "group" in tags:
             files = [self.tree.item(c, "text") for c in self.tree.get_children(item)]
             self.current_frame_list = files; self.current_frame_index = 0
-            if files: self.is_playing = True; self.btn_play.config(text="⏸ Stop"); self.run_anim_loop()
+            if files: 
+                was_playing = self.is_playing
+                self.is_playing = True; self.btn_play.config(text="⏸ Stop")
+                if not was_playing: self.run_anim_loop()
 
     def on_palette_click(self, event):
-        col, row = event.x // 16, event.y // 16
-        idx = row * 16 + col
-        if idx >= 256: return
+        if event.x < 0 or event.y < 0 or event.x >= 256 or event.y >= 256: return
+        idx = (event.y // 16) * 16 + (event.x // 16)
+        if idx >= len(self.palette_data) // 3: return
         
         if not self.group_mode_var.get():
-            self.last_selected_index = idx
-            self.selected_indices = {idx}
-            self.draw_palette_grid()
-            self.open_popup_editor(idx, event)
-            return
-
-        self.reference_color_index = idx
-        self.last_selected_index = idx
+            self.last_selected_index = idx; self.selected_indices = {idx}
+            self.draw_palette_grid(); self.open_popup_editor(idx, event); return
+        self.reference_color_index = idx; self.last_selected_index = idx
         if self.palette_snapshot is None: self.palette_snapshot = list(self.palette_data)
         self.update_selection_dynamic()
 
     def on_palette_rclick(self, event):
-        col, row = event.x // 16, event.y // 16
-        idx = row * 16 + col
-        if idx >= 256: return
+        if event.x < 0 or event.y < 0 or event.x >= 256 or event.y >= 256: return
+        idx = (event.y // 16) * 16 + (event.x // 16)
+        if idx >= len(self.palette_data) // 3: return
+        
         if idx in self.selected_indices: self.selected_indices.remove(idx)
         else: self.selected_indices.add(idx)
-        self.apply_hsl_to_selection()
-        self.draw_palette_grid()
-        self.render_current()
+        self.apply_hsl_to_selection(); self.draw_palette_grid(); self.render_current()
 
     def update_selection_dynamic(self):
         if self.reference_color_index == -1: return
         if self.palette_snapshot is None: self.palette_snapshot = list(self.palette_data)
         target = self.palette_snapshot[self.reference_color_index*3 : self.reference_color_index*3+3]
-        tol = self.tol_var.get()
-        max_dist = 442.0 * (tol / 100.0)
-        new_sel = set()
-        for i in range(256):
-            if i*3+2 >= len(self.palette_snapshot): break
-            current = self.palette_snapshot[i*3 : i*3+3]
-            dist = math.sqrt(sum((t - c) ** 2 for t, c in zip(target, current)))
-            if dist <= max_dist: new_sel.add(i)
-        self.selected_indices = new_sel
-        self.apply_hsl_to_selection()
-        self.draw_palette_grid()
-        self.render_current()
+        max_dist = 442.0 * (self.tol_var.get() / 100.0)
+        self.selected_indices = {i for i in range(len(self.palette_snapshot)//3) if math.sqrt(sum((t - c) ** 2 for t, c in zip(target, self.palette_snapshot[i*3 : i*3+3]))) <= max_dist}
+        self.apply_hsl_to_selection(); self.draw_palette_grid(); self.render_current()
 
     def start_group_edit(self, event):
         if self.palette_snapshot is None: self.palette_snapshot = list(self.palette_data)
-
-    def update_group_edit(self, event):
-        self.apply_hsl_to_selection()
-        self.draw_palette_grid()
-        self.render_current()
-
+        
+    def update_group_edit(self, event): self.apply_hsl_to_selection(); self.draw_palette_grid(); self.render_current()
+    
     def end_group_edit(self, event): pass
 
     def apply_hsl_to_selection(self):
         if self.palette_snapshot is None: return
-        dh = self.grp_h.get(); ds = self.grp_s.get(); dl = self.grp_l.get()
+        dh, ds, dl = self.grp_h.get(), self.grp_s.get(), self.grp_l.get()
         self.palette_data = list(self.palette_snapshot)
         for idx in self.selected_indices:
-            r = self.palette_snapshot[idx*3]; g = self.palette_snapshot[idx*3+1]; b = self.palette_snapshot[idx*3+2]
+            r, g, b = self.palette_snapshot[idx*3:idx*3+3]
             h, l, s = colorsys.rgb_to_hls(r/255.0, g/255.0, b/255.0)
-            h = (h + dh) % 1.0
-            s = max(0.0, min(1.0, s + ds))
-            l = max(0.0, min(1.0, l + dl))
-            nr, ng, nb = colorsys.hls_to_rgb(h, l, s)
-            self.palette_data[idx*3] = int(nr*255)
-            self.palette_data[idx*3+1] = int(ng*255)
-            self.palette_data[idx*3+2] = int(nb*255)
+            nr, ng, nb = colorsys.hls_to_rgb((h + dh) % 1.0, max(0.0, min(1.0, l + dl)), max(0.0, min(1.0, s + ds)))
+            
+            self.palette_data[idx*3:idx*3+3] = [
+                int(max(0, min(255, nr * 255))), 
+                int(max(0, min(255, ng * 255))), 
+                int(max(0, min(255, nb * 255)))
+            ]
 
     def apply_group_edit(self):
-        self.palette_snapshot = None
-        self.grp_h.set(0); self.grp_s.set(0); self.grp_l.set(0)
-        self.selected_indices.clear()
-        self.reference_color_index = -1
-        self.draw_palette_grid()
-        self.save_state()
+        self.palette_snapshot = None; self.grp_h.set(0); self.grp_s.set(0); self.grp_l.set(0)
+        self.selected_indices.clear(); self.reference_color_index = -1
+        self.unsaved_color_edits += 1
+        self.draw_palette_grid(); self.save_state()
 
     def cancel_group_edit(self):
-        if self.palette_snapshot:
-            self.palette_data = list(self.palette_snapshot)
-            self.palette_snapshot = None
+        if self.palette_snapshot: self.palette_data = list(self.palette_snapshot); self.palette_snapshot = None
         self.grp_h.set(0); self.grp_s.set(0); self.grp_l.set(0)
-        self.selected_indices.clear()
-        self.reference_color_index = -1
-        self.draw_palette_grid()
-        self.render_current()
+        self.selected_indices.clear(); self.reference_color_index = -1
+        self.draw_palette_grid(); self.render_current()
 
     def clear_selection(self): self.cancel_group_edit()
 
     def open_popup_editor(self, idx, event):
-        if self.active_popup:
-            self.active_popup.destroy(); self.active_popup = None
-        rgb = tuple(self.palette_data[idx*3 : idx*3+3])
-        if not self.palette_alphas: self.palette_alphas = [255]*256
-        alpha = self.palette_alphas[idx]
-        rgba = rgb + (alpha,)
-        rx = self.pal_canvas.winfo_rootx() + event.x + 20
-        ry = self.pal_canvas.winfo_rooty() + event.y
+        if self.active_popup: self.active_popup.destroy()
+        if not self.palette_alphas: self.palette_alphas = [255]*(len(self.palette_data)//3)
+        rgba = tuple(self.palette_data[idx*3 : idx*3+3]) + (self.palette_alphas[idx],)
         orig_rgba = list(rgba)
         
         def on_up(i, c):
-            self.palette_data[i*3] = c[0]
-            self.palette_data[i*3+1] = c[1]
-            self.palette_data[i*3+2] = c[2]
-            self.palette_alphas[i] = c[3]
-            self.draw_palette_grid()
-            self.render_current()
-            
+            self.palette_data[i*3:i*3+3], self.palette_alphas[i] = c[0:3], c[3]
+            self.draw_palette_grid(); self.render_current()
         def on_ap(i, c): 
             self.active_popup = None
+            self.unsaved_color_edits += 1
             self.save_state()
-            
-        def on_ca(i):
-            on_up(i, orig_rgba)
-            self.active_popup = None
+        def on_ca(i): on_up(i, orig_rgba); self.active_popup = None
 
         self.active_popup = PopupColorEditor(self.app.root, idx, rgba, on_up, on_ap, on_ca)
-        self.active_popup.geometry(f"+{rx}+{ry}")
+        self.active_popup.geometry(f"+{self.pal_canvas.winfo_rootx() + event.x + 20}+{self.pal_canvas.winfo_rooty() + event.y}")
 
     def import_palette(self):
-        f = filedialog.askopenfilename(filetypes=[("Palette", "*.pal;*.act")])
-        if not f: return
+        if not (f := filedialog.askopenfilename(filetypes=[("Palette", "*.pal;*.act")])): return
         try:
             with open(f, 'r') as pal_file:
                 lines = pal_file.readlines()
-                if "JASC-PAL" not in lines[0]:
-                    messagebox.showerror("Error", "Only JASC-PAL supported for now")
-                    return
-                count = int(lines[2].strip())
-                self.palette_data = []
-                for i in range(count):
-                    parts = lines[3+i].strip().split()
-                    if len(parts) >= 3:
-                        self.palette_data.extend([int(p) for p in parts[:3]])
-                while len(self.palette_data) < 768: self.palette_data.extend([0,0,0])
-                self.draw_palette_grid()
-                self.render_current()
-                self.save_state()
-                self.show_notification("Palette importée avec succès.")
-        except Exception as e: 
-            logging.error(f"Palette import error: {e}", exc_info=True)
-            messagebox.showerror("Error", str(e))
+                if "JASC-PAL" not in lines[0]: messagebox.showerror("Error", "Only JASC-PAL supported for now"); return
+                
+                raw_data = [int(p) for i in range(int(lines[2].strip())) for p in lines[3+i].strip().split()[:3]]
+                valid_len = len(raw_data)
+                while valid_len >= 3 and raw_data[valid_len-3:valid_len] == raw_data[:3]:
+                    valid_len -= 3
+                if valid_len == 0 and len(raw_data) > 0: valid_len = 3 
+                
+                self.palette_data = raw_data[:valid_len]
+                self.palette_alphas = [255] * (len(self.palette_data)//3)
+                
+                self.draw_palette_grid(); self.render_current(); self.save_state(); self.show_notification("Palette importée avec succès.")
+        except Exception as e: logging.error(f"Palette import error: {e}", exc_info=True); messagebox.showerror("Error", str(e))
 
     def export_palette(self):
-        f = filedialog.asksaveasfilename(defaultextension=".pal", filetypes=[("JASC Palette", "*.pal")])
-        if not f: return
+        if not (f := filedialog.asksaveasfilename(defaultextension=".pal", filetypes=[("JASC Palette", "*.pal")])): return
         try:
             with open(f, 'w') as pal_file:
                 pal_file.write("JASC-PAL\n0100\n256\n")
-                for i in range(256):
+                for i in range(256): 
                     if i*3+2 < len(self.palette_data):
-                        r,g,b = self.palette_data[i*3:i*3+3]
-                        pal_file.write(f"{r} {g} {b}\n")
+                        pal_file.write(f"{self.palette_data[i*3]} {self.palette_data[i*3+1]} {self.palette_data[i*3+2]}\n")
                     else:
-                        pal_file.write("0 0 0\n")
+                        pad_r, pad_g, pad_b = self.palette_data[:3] if self.palette_data else [0,0,0]
+                        pal_file.write(f"{pad_r} {pad_g} {pad_b}\n")
             self.show_notification("Palette exportée avec succès.")
-        except Exception as e: 
-            logging.error(f"Palette export error: {e}", exc_info=True)
-            messagebox.showerror("Error", str(e))
+        except Exception as e: logging.error(f"Palette export error: {e}", exc_info=True); messagebox.showerror("Error", str(e))
